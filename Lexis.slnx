@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="Lexis.API/Lexis.API.csproj" />
+  <Project Path="Lexis.Core/Lexis.Core.csproj" />
+</Solution>
