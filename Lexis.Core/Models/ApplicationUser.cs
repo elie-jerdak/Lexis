@@ -13,7 +13,7 @@ namespace Lexis.Core.Models
         public int TokensConsumedCurrentMonth { get; set; } = 0;
         // Rate limiting
         public DateTime? LastRequestTimestamp { get; set; }
-
+        public ICollection<RefreshToken> RefreshTokens { get; set; } = new List<RefreshToken>();
         public virtual ICollection<Conversation> Conversations { get; set; } = new List<Conversation>();
 
         public virtual ICollection<Document> Documents { get; set; } = new List<Document>();

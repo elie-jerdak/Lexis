@@ -161,7 +161,7 @@ namespace Lexis.API.Migrations
                     b.HasIndex(new[] { "UserId", "IsDeleted", "UpdatedAt" }, "IX_Conversations_UserId_IsDeleted_UpdatedAt")
                         .IsDescending(false, false, true);
 
-                    b.ToTable("Conversations", (string)null);
+                    b.ToTable("Conversations");
                 });
 
             modelBuilder.Entity("Lexis.Core.Models.ConversationDocumentFilter", b =>
@@ -195,7 +195,7 @@ namespace Lexis.API.Migrations
                     b.HasIndex(new[] { "ConversationId", "DocumentId" }, "UX_Conversation_Document")
                         .IsUnique();
 
-                    b.ToTable("ConversationDocumentFilters", (string)null);
+                    b.ToTable("ConversationDocumentFilters");
                 });
 
             modelBuilder.Entity("Lexis.Core.Models.Document", b =>
@@ -249,7 +249,7 @@ namespace Lexis.API.Migrations
                     b.HasIndex(new[] { "UploadedBy", "FileHash" }, "UX_Documents_User_FileHash")
                         .IsUnique();
 
-                    b.ToTable("Documents", (string)null);
+                    b.ToTable("Documents");
                 });
 
             modelBuilder.Entity("Lexis.Core.Models.DocumentChunk", b =>
@@ -294,7 +294,7 @@ namespace Lexis.API.Migrations
                     b.HasIndex(new[] { "QdrantVectorId" }, "UX_DocumentChunks_QdrantVectorId")
                         .IsUnique();
 
-                    b.ToTable("DocumentChunks", (string)null);
+                    b.ToTable("DocumentChunks");
                 });
 
             modelBuilder.Entity("Lexis.Core.Models.Message", b =>
@@ -333,7 +333,7 @@ namespace Lexis.API.Migrations
 
                     b.HasIndex(new[] { "ConversationId", "CreatedAt" }, "IX_Messages_ConversationId_CreatedAt");
 
-                    b.ToTable("Messages", (string)null);
+                    b.ToTable("Messages");
                 });
 
             modelBuilder.Entity("Lexis.Core.Models.MessageCitation", b =>
@@ -367,7 +367,40 @@ namespace Lexis.API.Migrations
 
                     b.HasIndex(new[] { "MessageId" }, "IX_MessageCitations_MessageId");
 
-                    b.ToTable("MessageCitations", (string)null);
+                    b.ToTable("MessageCitations");
+                });
+
+            modelBuilder.Entity("Lexis.Core.Models.RefreshToken", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<DateTime>("ExpiresAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<DateTime?>("RevokedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("Token")
+                        .IsRequired()
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)");
+
+                    b.Property<int>("UserId")
+                        .HasColumnType("integer");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("Token")
+                        .IsUnique();
+
+                    b.HasIndex("UserId", "RevokedAt");
+
+                    b.ToTable("RefreshTokens");
                 });
 
             modelBuilder.Entity("Lexis.Core.Models.UsageLog", b =>
@@ -407,7 +440,7 @@ namespace Lexis.API.Migrations
 
                     b.HasIndex(new[] { "UserId", "RequestTime" }, "IX_UsageLogs_UserId_RequestTime");
 
-                    b.ToTable("UsageLogs", (string)null);
+                    b.ToTable("UsageLogs");
                 });
 
             modelBuilder.Entity("Microsoft.AspNetCore.Identity.IdentityRole<int>", b =>
@@ -624,6 +657,17 @@ namespace Lexis.API.Migrations
                     b.Navigation("Message");
                 });
 
+            modelBuilder.Entity("Lexis.Core.Models.RefreshToken", b =>
+                {
+                    b.HasOne("Lexis.Core.Models.ApplicationUser", "User")
+                        .WithMany("RefreshTokens")
+                        .HasForeignKey("UserId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("User");
+                });
+
             modelBuilder.Entity("Lexis.Core.Models.UsageLog", b =>
                 {
                     b.HasOne("Lexis.Core.Models.Message", "Message")
@@ -697,6 +741,8 @@ namespace Lexis.API.Migrations
                     b.Navigation("Conversations");
 
                     b.Navigation("Documents");
+
+                    b.Navigation("RefreshTokens");
 
                     b.Navigation("UsageLogs");
                 });

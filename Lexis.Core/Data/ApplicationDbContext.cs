@@ -3,6 +3,7 @@ using Lexis.Core.Models;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Identity.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore;
+using Npgsql;
 
 namespace Lexis.API.Data;
 
@@ -29,13 +30,14 @@ public partial class ApplicationDbContext
 
     public virtual DbSet<UsageLog> UsageLogs { get; set; }
 
+    public DbSet<RefreshToken> RefreshTokens { get; set; }
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         base.OnModelCreating(modelBuilder);
 
-        modelBuilder
-            .HasPostgresEnum<MessageRole>()
-            .HasPostgresEnum<DocumentStatus>();
+        modelBuilder.HasPostgresEnum<MessageRole>();
+        modelBuilder.HasPostgresEnum<DocumentStatus>();
 
         modelBuilder.Entity<ApplicationUser>(entity =>
         {
@@ -66,6 +68,29 @@ public partial class ApplicationDbContext
                   .IsRequired();
 
             entity.Property(e => e.LastRequestTimestamp);
+        });
+
+        modelBuilder.Entity<RefreshToken>(entity =>
+        {
+            entity.HasKey(x => x.Id);
+
+            entity.Property(x => x.Token)
+                .IsRequired()
+                .HasMaxLength(500);
+            
+            entity.HasIndex(x => x.Token)
+                .IsUnique();
+
+            entity.HasIndex(x => new
+            {
+                x.UserId,
+                x.RevokedAt
+            });
+
+            entity.HasOne(x => x.User)
+                .WithMany(x => x.RefreshTokens)
+                .HasForeignKey(x => x.UserId)
+                .OnDelete(DeleteBehavior.Cascade);
         });
 
         modelBuilder.Entity<Conversation>(entity =>
