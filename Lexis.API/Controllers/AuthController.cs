@@ -1,4 +1,5 @@
-﻿using Lexis.Core.DTOs.Auth;
+﻿using Lexis.API.Common;
+using Lexis.Core.DTOs.Auth;
 using Lexis.Core.Interfaces;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http;
@@ -8,9 +9,8 @@ using System.Security.Claims;
 
 namespace Lexis.API.Controllers
 {
-    [Route("api/[controller]")]
-    [ApiController]
-    public class AuthController : ControllerBase
+    [Route("api/[controller]")] 
+    public class AuthController : BaseApiController
     {
         private readonly IAuthService _authService;
 

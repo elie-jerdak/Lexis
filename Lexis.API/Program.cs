@@ -80,6 +80,8 @@ builder.Services.AddAuthorization();
 builder.Services.AddScoped<IJwtService, JwtService>();
 builder.Services.AddScoped<IAuthService, AuthenticationService>();
 builder.Services.AddScoped<IEmailService, EmailService>();
+builder.Services.AddScoped<IUserService, UserService>();
+builder.Services.AddScoped<IRefreshTokenService, RefreshTokenService>();
 
 var app = builder.Build();
 

@@ -13,17 +13,19 @@ namespace Lexis.Core.Services
         private readonly UserManager<ApplicationUser> _userManager;
         private readonly RoleManager<IdentityRole<int>> _roleManager;
         private readonly IEmailService _emailService;
+        private readonly IRefreshTokenService _refreshTokenService;
         private readonly IJwtService _jwtService;
         private readonly ApplicationDbContext _context;
 
 
         public AuthenticationService(UserManager<ApplicationUser> userManager, RoleManager<IdentityRole<int>> roleManager,
-            IJwtService jwtService, ApplicationDbContext context, IEmailService emailService)
+            IJwtService jwtService, ApplicationDbContext context, IEmailService emailService, IRefreshTokenService refreshTokenService)
         {
             _userManager = userManager;
             _roleManager = roleManager;
             _jwtService = jwtService;
             _context = context;
+            _refreshTokenService = refreshTokenService;
             _emailService = emailService;
         }
 
@@ -121,6 +123,13 @@ namespace Lexis.Core.Services
                     "EMAIL_NOT_CONFIRMED");
             }
 
+            if (!user.IsActive)
+            {
+                return ServiceResult<AuthResponseDTO>.Failure(
+                    "Account is deactivated.",
+                    "ACCOUNT_DEACTIVATED");
+            }
+
             var passwordValid = await _userManager.CheckPasswordAsync(user, request.Password);
 
             if (!passwordValid)
@@ -204,7 +213,7 @@ namespace Lexis.Core.Services
                     "TOKEN_NOT_FOUND");
             }
 
-            if (refreshToken.IsRevoked)
+            if (refreshToken.RevokedAt != null)
             {
                 return ServiceResult<bool>.Failure(
                     "Refresh token already revoked.",
@@ -352,7 +361,7 @@ namespace Lexis.Core.Services
             }
 
             // Revoke all refresh tokens after password change
-            await RevokeAllRefreshTokensAsync(user.Id);
+            await _refreshTokenService.RevokeUserRefreshTokensAsync(user.Id);
 
             return ServiceResult<bool>.Success(true);
         }
@@ -379,7 +388,7 @@ namespace Lexis.Core.Services
             }
 
             // Revoke existing refresh tokens
-            await RevokeAllRefreshTokensAsync(user.Id);
+            await _refreshTokenService.RevokeUserRefreshTokensAsync(user.Id);
 
             return ServiceResult<bool>.Success(true);
         }
@@ -387,7 +396,7 @@ namespace Lexis.Core.Services
         // Private Helper Functions
         private async Task<AuthResponseDTO> GenerateTokens(ApplicationUser user)
         {
-            await RevokeAllRefreshTokensAsync(user.Id);
+            await _refreshTokenService.RevokeUserRefreshTokensAsync(user.Id);
 
             var roles = await _userManager.GetRolesAsync(user);
 
@@ -404,21 +413,6 @@ namespace Lexis.Core.Services
                 RefreshToken = refreshToken.Token,
                 AccessTokenExpiration = DateTime.UtcNow.AddMinutes(15)
             };
-        }
-        private async Task RevokeAllRefreshTokensAsync(int userId)
-        {
-            var activeTokens = await _context.RefreshTokens
-                .Where(rt => rt.UserId == userId &&
-                             rt.RevokedAt == null &&
-                             rt.ExpiresAt > DateTime.UtcNow)
-                .ToListAsync();
-
-            foreach (var token in activeTokens)
-            {
-                token.Revoke();
-            }
-
-            await _context.SaveChangesAsync();
-        }
+        } 
     }
 }
