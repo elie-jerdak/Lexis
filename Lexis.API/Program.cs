@@ -1,4 +1,5 @@
 using Lexis.API.Data;
+using Lexis.Core.Enums;
 using Lexis.Core.Helpers;
 using Lexis.Core.Interfaces;
 using Lexis.Core.Models;
@@ -70,6 +71,17 @@ builder.Services.AddResend(options =>
         builder.Configuration["Resend:ApiKey"]!;
 });
 
+builder.Services.AddDbContext<ApplicationDbContext>(options =>
+{
+    options.UseNpgsql(
+        builder.Configuration.GetConnectionString("DefaultConnection"),
+        npgsql =>
+        {
+            npgsql.MapEnum<DocumentStatus>("document_status");
+            npgsql.MapEnum<MessageRole>("message_role");
+        });
+});
+
 builder.Services.Configure<DataProtectionTokenProviderOptions>(options =>
 {
     options.TokenLifespan = TimeSpan.FromHours(24);
@@ -82,6 +94,9 @@ builder.Services.AddScoped<IAuthService, AuthenticationService>();
 builder.Services.AddScoped<IEmailService, EmailService>();
 builder.Services.AddScoped<IUserService, UserService>();
 builder.Services.AddScoped<IRefreshTokenService, RefreshTokenService>();
+builder.Services.AddScoped<IFileStorageService, LocalFileStorageService>();
+builder.Services.AddScoped<IFileHashService, FileHashService>();
+builder.Services.AddScoped<IDocumentService, DocumentService>();
 
 var app = builder.Build();
 

@@ -36,8 +36,11 @@ public partial class ApplicationDbContext
     {
         base.OnModelCreating(modelBuilder);
 
-        modelBuilder.HasPostgresEnum<MessageRole>();
-        modelBuilder.HasPostgresEnum<DocumentStatus>();
+        modelBuilder.HasPostgresEnum<DocumentStatus>(
+            "document_status");
+
+        modelBuilder.HasPostgresEnum<MessageRole>(
+            "message_role");
 
         modelBuilder.Entity<ApplicationUser>(entity =>
         {
@@ -118,6 +121,8 @@ public partial class ApplicationDbContext
             entity.Property(e => e.Id).HasDefaultValueSql("gen_random_uuid()");
             entity.Property(e => e.FileHash).IsFixedLength();
             entity.Property(e => e.UploadedAt).HasDefaultValueSql("CURRENT_TIMESTAMP");
+            entity.Property(e => e.Status)
+                  .HasColumnType("document_status");
         });
 
         modelBuilder.Entity<DocumentChunk>(entity =>
