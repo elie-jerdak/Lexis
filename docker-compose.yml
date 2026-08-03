@@ -1,0 +1,21 @@
+services:
+
+  api:
+    build:
+      context: .
+      dockerfile: Lexis.API/Dockerfile
+    container_name: lexis-api
+    restart: unless-stopped
+    ports:
+      - "5000:8080"
+    depends_on:
+      - docling
+
+
+  docling:
+    build:
+      context: ./Lexis.Docling
+    container_name: lexis-docling
+    restart: unless-stopped
+    ports:
+      - "8000:8000"

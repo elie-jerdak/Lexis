@@ -32,6 +32,12 @@ public partial class Document
 
     public DateTime UploadedAt { get; set; }
 
+    public DateTime? ProcessingStartedAt { get; set; }
+
+    public DateTime? ProcessingCompletedAt { get; set; }
+
+    public string? ProcessingError { get; set; }
+
     [ForeignKey(nameof(UploadedBy))]
     public virtual ApplicationUser UploadedByUser { get; set; } = null!;
 

@@ -1,4 +1,5 @@
 using Lexis.API.Data;
+using Lexis.Core.BackgroundServices;
 using Lexis.Core.Enums;
 using Lexis.Core.Helpers;
 using Lexis.Core.Interfaces;
@@ -89,6 +90,15 @@ builder.Services.Configure<DataProtectionTokenProviderOptions>(options =>
 
 builder.Services.AddAuthorization();
 
+builder.Services.AddHostedService<DocumentProcessingWorker>();
+
+builder.Services.AddHttpClient<IDocumentExtractionService, DoclingExtractionService>(client =>
+{
+    //client.BaseAddress = new Uri("http://docling:8000/"); use docker-compose on the yaml file
+    client.BaseAddress = new Uri("http://host.docker.internal:8000/");
+    client.Timeout = TimeSpan.FromMinutes(5);
+});
+
 builder.Services.AddScoped<IJwtService, JwtService>();
 builder.Services.AddScoped<IAuthService, AuthenticationService>();
 builder.Services.AddScoped<IEmailService, EmailService>();
@@ -97,6 +107,9 @@ builder.Services.AddScoped<IRefreshTokenService, RefreshTokenService>();
 builder.Services.AddScoped<IFileStorageService, LocalFileStorageService>();
 builder.Services.AddScoped<IFileHashService, FileHashService>();
 builder.Services.AddScoped<IDocumentService, DocumentService>();
+builder.Services.AddScoped<IDocumentProcessingService, DocumentProcessingService>(); 
+builder.Services.AddScoped<ITextCleaningService, TextCleaningService>(); 
+builder.Services.AddScoped<IDocumentPreprocessingService, DocumentPreprocessingService>(); 
 
 var app = builder.Build();
 
