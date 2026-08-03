@@ -30,6 +30,9 @@ namespace Lexis.Core.Services
             // Remove excessive empty lines
             text = Regex.Replace(text, @"\n{3,}", "\n\n");
 
+            // Remove lines made only of punctuation/symbols
+            text = Regex.Replace(text, @"^[^\p{L}\p{N}]+$", "", RegexOptions.Multiline);
+
             return text.Trim();
         }
     }

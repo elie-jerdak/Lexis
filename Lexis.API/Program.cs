@@ -109,7 +109,8 @@ builder.Services.AddScoped<IFileHashService, FileHashService>();
 builder.Services.AddScoped<IDocumentService, DocumentService>();
 builder.Services.AddScoped<IDocumentProcessingService, DocumentProcessingService>(); 
 builder.Services.AddScoped<ITextCleaningService, TextCleaningService>(); 
-builder.Services.AddScoped<IDocumentPreprocessingService, DocumentPreprocessingService>(); 
+builder.Services.AddScoped<IDocumentPreprocessingService, DocumentPreprocessingService>();
+builder.Services.AddScoped<IDocumentStructureService, DocumentStructureService>();
 
 var app = builder.Build();
 

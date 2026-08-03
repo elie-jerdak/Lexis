@@ -97,6 +97,18 @@ namespace Lexis.Core.Services
 
                     var processedPages = await _preprocessingService.ProcessAsync(extractedDocument.Pages, cancellationToken);
 
+
+                    foreach (var page in processedPages)
+                    {
+                        _logger.LogInformation(
+                            """
+                            ===== PAGE {Page} =====
+
+                            {Text}
+                            """,
+                            page.PageNumber,
+                            page.Text);
+                    }
                     cancellationToken.ThrowIfCancellationRequested();
 
                     // 3. Chunk document

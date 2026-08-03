@@ -114,8 +114,74 @@ def _warm_up():
 _warm_up()
 
 
-@app.get("/")
-def health():
+def build_structured_elements(document):
+    """
+    Walk docling's structured document tree (not just the flattened
+    markdown/text export) and group elements by page, preserving type
+    info and cross-page continuation for tables/figures.
+
+    Docling gives every item (TextItem, SectionHeaderItem, TableItem,
+    PictureItem, ListItem, ...) a `.prov` list of ProvenanceItem entries
+    — one per page the item actually appears on. When a table or figure
+    spans a page break, that SAME item has multiple prov entries (one
+    per page), which is what lets us flag continuation directly instead
+    of guessing from position/text.
+    """
+    elements_by_page = {}
+    table_ids = {}   # id(item) -> sequential table number
+    figure_ids = {}  # id(item) -> sequential figure number
+    order_counter = 0
+    page_order_counters = {}  # page_no -> next local order index on that page
+
+    for item, _level in document.iterate_items():
+        prov_entries = getattr(item, "prov", None)
+        if not prov_entries:
+            continue  # some structural items (groups) carry no page provenance
+
+        label = str(getattr(item, "label", item.__class__.__name__))
+
+        element = {"elementType": label, "order": order_counter}
+        order_counter += 1
+
+        if label == "table":
+            key = id(item)
+            if key not in table_ids:
+                table_ids[key] = len(table_ids) + 1
+            element["tableId"] = table_ids[key]
+            try:
+                element["content"] = item.export_to_markdown(document)
+            except Exception:
+                element["content"] = None
+
+        elif label == "picture":
+            key = id(item)
+            if key not in figure_ids:
+                figure_ids[key] = len(figure_ids) + 1
+            element["figureId"] = figure_ids[key]
+            try:
+                element["caption"] = item.caption_text(document)
+            except Exception:
+                element["caption"] = None
+
+        else:
+            element["text"] = getattr(item, "text", None)
+
+        num_pages_spanned = len(prov_entries)
+        for idx, prov in enumerate(prov_entries):
+            page_element = dict(element)
+            page_element["continuedFromPreviousPage"] = idx > 0
+            page_element["continuesOnNextPage"] = idx < num_pages_spanned - 1
+
+            local_order = page_order_counters.get(prov.page_no, 0)
+            page_element["pageOrder"] = local_order
+            page_order_counters[prov.page_no] = local_order + 1
+
+            elements_by_page.setdefault(prov.page_no, []).append(page_element)
+
+    return elements_by_page
+
+
+
     log.info("Health check hit")
     return {"status": "Docling service running"}
 
@@ -150,20 +216,28 @@ def extract(file: UploadFile = File(...)):
 
         page_numbers = sorted(document.pages.keys())
         log.info(f"[{file.filename}] Document has {len(page_numbers)} page(s), "
-                  f"exporting per-page markdown/text...")
+                  f"exporting per-page markdown/text/elements...")
+
+        _t0 = time.time()
+        elements_by_page = build_structured_elements(document)
+        log.info(f"[{file.filename}] Structured elements built in "
+                  f"{time.time() - _t0:.2f}s")
 
         pages = []
         for page_no in page_numbers:
             _t0 = time.time()
             page_markdown = document.export_to_markdown(page_no=page_no)
             page_text = document.export_to_text(page_no=page_no)
+            page_elements = elements_by_page.get(page_no, [])
             log.info(f"[{file.filename}] Page {page_no} exported in "
                       f"{time.time() - _t0:.2f}s "
-                      f"(markdown: {len(page_markdown)} chars, text: {len(page_text)} chars)")
+                      f"(markdown: {len(page_markdown)} chars, text: {len(page_text)} chars, "
+                      f"elements: {len(page_elements)})")
             pages.append({
                 "pageNumber": page_no,
                 "text": page_text,
                 "markdown": page_markdown,
+                "elements": page_elements,
             })
 
         log.info(f"[{file.filename}] Done, returning response")
