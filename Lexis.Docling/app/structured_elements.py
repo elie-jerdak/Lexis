@@ -15,6 +15,92 @@ def _is_valid_roman(token: str) -> bool:
     token = token.upper()
     return bool(token) and bool(ROMAN_NUMERAL_RE.match(token))
 
+
+TOC_DOT_LEADER_RE = re.compile(r"\.{4,}\s*\d+\s*$")
+
+
+def _is_toc_line(text: str) -> bool:
+    """
+    Table-of-contents dot-leader lines ("APPENDIX III.......android 25")
+    are a near-universal PDF convention -- a heading-like label, a run
+    of leader dots, and a trailing page number -- independent of any
+    one document's wording. Docling sometimes classifies these as real
+    headings (they're often bold/large-font, same as a real heading),
+    which then permanently pollutes every subsequent item's headingPath
+    with a page-number-suffixed ghost ancestor for the rest of the
+    document -- there's nothing later that looks "shallower" than a
+    fake root like this to ever close it.
+    """
+    return bool(TOC_DOT_LEADER_RE.search(text.strip()))
+
+
+def _looks_like_sentence_not_heading(text: str) -> bool:
+    """
+    A heading title is short and doesn't read as a grammatically
+    complete sentence/clause. Numbered/lettered enumerated LIST ITEMS
+    ("c) the composition of the strengths are quantitatively
+    proportional, i.e. the ratio between...") share the surface
+    features that make something look like a heading -- a short
+    alphanumeric prefix, sometimes bold styling across the whole run --
+    but are body content, not structural headings, and must never
+    become part of the persistent hierarchy.
+
+    This check runs independently of has_own_numbering/numbering
+    recognition below: a lowercase list marker like "c)" isn't matched
+    by any numbering regex at all (deliberately -- see
+    _lowercase_roman_prefix_end), which otherwise leaves it with zero
+    scrutiny if Docling happens to classify it as a heading. Sentence
+    shape is a general enough signal to catch that regardless of
+    whether the prefix itself was ever recognized as numbering.
+
+    General, not document-specific:
+    - length: real heading titles are almost always well under ~20
+      words / ~150 characters. Longer than that is prose.
+    - terminal punctuation on an already-substantial clause: most real
+      headings carry no trailing period/semicolon at all. A period only
+      counts once the text is long enough that a real title wouldn't
+      normally end that way (a short "1.2 Overview." keeping its
+      trailing dot is still a fine heading).
+    """
+    text = text.strip()
+    word_count = len(text.split())
+    if len(text) > 150 or word_count > 20:
+        return True
+    if len(text) > 50 and word_count > 8 and re.search(r"[.;]\s*$", text):
+        return True
+    return False
+
+
+def _is_strong_compound_numbering(numbering_scheme: str | None, numbering_level: int | None) -> bool:
+    """
+    Multi-SEGMENT compound numbering ("IV.1.1", "4.1.2") is specific,
+    structural evidence of a real heading on its own -- flat enumerated
+    lists overwhelmingly use a single numbering TOKEN for a bullet
+    ("1.", "a)", "i.", "IV."), not a multi-level compound one. A PDF
+    generator that renders a deep heading tier with no distinguishing
+    style at all (confirmed: Docling's own layout model didn't tag it
+    as a heading either, so this isn't a font-detection miss -- there's
+    genuinely nothing to detect) still leaves this pattern as strong
+    enough evidence to promote without requiring bold/italic
+    confirmation. Single-token numbering ("1. Confirm the invoice")
+    stays gated behind the styling check below -- that ambiguity is
+    real and common, this one isn't.
+    A letter+number combination is, by construction, always at least a
+    two-part compound reference ("A.1", "III.1") -- flat list markers
+    never combine a letter and a number like that, they use a single
+    token ("1.", "a)", "i."). So any letter-compound match qualifies,
+    without a depth threshold; only the decimal ("None"-scheme) path
+    needs one, since its minimum achievable match is already a
+    multi-segment decimal (a bare "1." doesn't reach this scheme at
+    all -- see numbering_depth_for_hierarchy), so >=2 there is really
+    just "any match of this scheme" too, stated for clarity.
+    """
+    if numbering_scheme == "letter-compound":
+        return True
+    if numbering_scheme is None and numbering_level is not None and numbering_level >= 2:
+        return True
+    return False
+
 # Token is the ONLY capturing group -- keyword name itself is
 # non-capturing via (?i:...), scoping case-insensitivity to just the
 # keyword. combined_numbering_level reads group(1) below.
@@ -49,17 +135,55 @@ BARE_ROMAN_HEADING_RE = re.compile(r"^\s*([IVXLCDM]{3,})[.\-–—]\s+\S")
 # document that uses "-" for both "A-Scope" and "A-2" behaves the same
 # way in each case.
 LETTER_NUMBER_COMPOUND_RE = re.compile(
-    r"^\s*(?P<letter>[A-Z]{1,2})[.\-–—]?(?P<number>\d+(?:\.\d+)*)\.?\s+\S"
+    r"^\s*(?P<letter>[A-Z]{1,4})[.\-–—]?(?P<number>\d+(?:\.\d+)*)\.?\s+\S"
 )
 
 ANY_HEADING_PREFIX_RE = re.compile(
     r"^\s*(?:(?i:chapter|article|section|part|appendix|annex)\s+(?:[0-9]+|[IVXLCDM]+|[A-Z]{1,2})\b"
     r"|§\s*\d+(?:\.\d+)*"
     r"|\d+(?:\.\d+)*\.?"
-    r"|[A-Z]{1,2}[.\-–—]?\d+(?:\.\d+)*\.?"
+    r"|[A-Z]{1,4}[.\-–—]?\d+(?:\.\d+)*\.?"
     r"|[IVXLCDM]{3,}"
     r"|[A-Z]{1,2}(?![a-zA-Z]))"  # negative lookahead: stops "An" matching inside "Annex"
 )
+
+
+def _lowercase_roman_prefix_end(text: str) -> int:
+    """
+    Recognizes lowercase roman-numeral list markers ("i - Testing on
+    product quality", "ii - Bioequivalence surrogate inference") that
+    ANY_HEADING_PREFIX_RE's roman/letter alternatives can't see, since
+    those are deliberately uppercase-only. Loosening them to be
+    case-insensitive would make ordinary lowercase words made up of
+    roman-numeral letters ("civil", "mix", "vivid", "mild"...) match as
+    a heading prefix anywhere they open a text block, not just at
+    actual list markers.
+
+    Scoped narrowly to avoid that: only matches a short run of roman-
+    numeral characters immediately followed by a "- "/": " label
+    separator (the actual convention seen in practice), AND only if
+    that run is itself syntactically a valid roman numeral via
+    _is_valid_roman -- "civil - Some heading" matches the character
+    class but fails roman validation, so it's correctly rejected.
+    """
+    match = re.match(r"[ivxlcdm]{1,4}(?=\s*[-–—:]\s)", text)
+    if match and _is_valid_roman(match.group(0).upper()):
+        return match.end()
+    return 0
+
+
+def _heading_prefix_end(text: str) -> int:
+    """
+    Single source of truth for "how much of this text is the heading's
+    own numbering/keyword prefix" -- used at every call site that needs
+    to separate a heading's numbering from its title/label, so the
+    uppercase and lowercase-roman-list-marker rules can't drift apart
+    between them.
+    """
+    match = ANY_HEADING_PREFIX_RE.match(text)
+    if match:
+        return match.end()
+    return _lowercase_roman_prefix_end(text)
 
 
 def classify_keyword_root_schemes(document) -> dict[str, str]:
@@ -224,10 +348,14 @@ from docling_core.types.doc import BoundingBox, CoordOrigin
 def derive_heading_label(text: str, max_length: int = 160) -> str:
     text = text.strip()
 
-    prefix_match = ANY_HEADING_PREFIX_RE.match(text)
-    prefix_end = prefix_match.end() if prefix_match else 0
+    prefix_end = _heading_prefix_end(text)
 
-    sep_skip_match = re.match(r"[:.\-–—]\s+", text[prefix_end:])
+    # Tolerate a space between the prefix and its separator ("i - Title",
+    # not just "i- Title") -- needed for lowercase-roman list markers,
+    # where the prefix match itself can't consume the separator (it's
+    # only a lookahead, so as not to falsely swallow "- " that belongs
+    # to unrelated text after a non-numbering word).
+    sep_skip_match = re.match(r"\s*[:.\-–—]\s+", text[prefix_end:])
     if sep_skip_match:
         prefix_end += sep_skip_match.end()
 
@@ -276,8 +404,15 @@ def _leading_bold_run_has_label(
     pdf_doc, page_no: int, bbox, page_height: float, *, require_label_text: bool = True
 ) -> bool:
     """
-    Does the leading bold run inside this item's own bbox extend past
-    its numbering into real label text?
+    Does the leading distinctively-styled run inside this item's own
+    bbox extend past its numbering into real label text?
+
+    "Distinctive style" means bold OR italic (see is_distinctive_span
+    below) -- not every template marks headings with bold. A generated
+    template observed in practice styles its top two heading tiers
+    bold and its third tier in italics only; treating bold as the only
+    valid signal made every one of those italic headings read as
+    "no distinguishing style at all" and get silently dropped.
 
     Uses PyMuPDF's `clip` to restrict extraction to the item's exact
     bbox, rather than matching against whole-page blocks/lines. This
@@ -287,18 +422,18 @@ def _leading_bold_run_has_label(
     Docling's.
 
     require_label_text controls what counts as evidence:
-    - True (default): the bold run must extend past the numbering into
-      real trailing text WITHIN THIS BLOCK. Used when item_text itself
-      already contains that trailing text (e.g. "D2.8.2 In addition to
-      the general report requirements..." -- number + a full sentence
-      bundled in one block). If the bold styling stops right after the
-      number, this is a numbered clause/list item wrongly classified as
-      a heading, not a real one.
-    - False: the numbering itself being bold is enough. Used when
+    - True (default): the distinctive run must extend past the
+      numbering into real trailing text WITHIN THIS BLOCK. Used when
+      item_text itself already contains that trailing text (e.g.
+      "D2.8.2 In addition to the general report requirements..." --
+      number + a full sentence bundled in one block). If the styling
+      stops right after the number, this is a numbered clause/list
+      item wrongly classified as a heading, not a real one.
+    - False: the numbering itself being styled is enough. Used when
       item_text is JUST the number/keyword with no trailing content at
       all (e.g. "ARTICLE V", title "MEETINGS AND PROCEDURES" given as a
       separate following heading block) -- there is no label to check
-      boldness on within this block, so requiring one would always fail
+      styling on within this block, so requiring one would always fail
       and permanently block a legitimate numbering-only heading.
     """
     if bbox is None:
@@ -325,9 +460,23 @@ def _leading_bold_run_has_label(
     for span in spans_in_order:
         span_text = span.get("text", "")
         font_name = span.get("font", "").lower()
-        is_bold_span = "bold" in font_name or "black" in font_name
+        flags = span.get("flags", 0)
+        # A heading's distinguishing style isn't always bold -- some
+        # templates mark lower tiers with italics instead (or in
+        # addition). flags is PyMuPDF's bitfield (bit 4 / value 16 =
+        # bold, bit 1 / value 2 = italic); the font-name substring
+        # check is kept as a fallback for fonts that don't set flags
+        # reliably.
+        is_distinctive_span = (
+            "bold" in font_name
+            or "black" in font_name
+            or "italic" in font_name
+            or "oblique" in font_name
+            or bool(flags & 16)
+            or bool(flags & 2)
+        )
 
-        if not is_bold_span:
+        if not is_distinctive_span:
             if span_text.strip() == "":
                 bold_prefix_text += span_text
                 continue
@@ -335,15 +484,28 @@ def _leading_bold_run_has_label(
 
         bold_prefix_text += span_text
 
-        terminator_match = BOLD_LABEL_TERMINATOR_RE.search(bold_prefix_text)
-        if terminator_match:
-            bold_prefix_text = bold_prefix_text[: terminator_match.end()]
-            break
+    # Only search for a terminator INSIDE the label text -- never inside
+    # the heading's own numbering/keyword prefix. A period ending a
+    # 2+ character numbering token ("II.", "10.") is not evidence that
+    # the label ends there; it's just what numbering periods look like,
+    # and treating it as a terminator was truncating the label away
+    # entirely for any numbering 2+ characters long (silently passing
+    # for single-character numerals like "I." or "V." only by the
+    # accident of the regex's own \w{2} lookbehind). Matches starting
+    # AT the prefix boundary itself (the numbering's trailing period)
+    # are excluded too, not just ones before it.
+    prefix_end = _heading_prefix_end(bold_prefix_text)
+    terminator_match = next(
+        (m for m in BOLD_LABEL_TERMINATOR_RE.finditer(bold_prefix_text) if m.start() > prefix_end),
+        None,
+    )
+    if terminator_match:
+        bold_prefix_text = bold_prefix_text[: terminator_match.end()]
 
     if not require_label_text:
         return len(bold_prefix_text.strip()) > 0
 
-    remainder = ANY_HEADING_PREFIX_RE.sub("", bold_prefix_text, count=1).lstrip(".:-–— ,;").strip()
+    remainder = bold_prefix_text[_heading_prefix_end(bold_prefix_text):].lstrip(".:-–— ,;").strip()
     return len(remainder) > 0
 
 def build_structured_elements(document, pdf_path: str):
@@ -384,6 +546,7 @@ def build_structured_elements(document, pdf_path: str):
     # hardcoded/absolute level and collide with the root, evicting it
     # from current_hierarchy_context. See usage below.
     open_roman_root_level = None
+    open_root_scheme = None
     
     pdf_doc = fitz.open(pdf_path)
 
@@ -422,8 +585,7 @@ def build_structured_elements(document, pdf_path: str):
         # the promotion and veto checks below key off this distinction,
         # via require_label_text on _leading_bold_run_has_label.
         stripped_item_text = item_text.strip()
-        own_prefix_match = ANY_HEADING_PREFIX_RE.match(stripped_item_text)
-        own_prefix_end = own_prefix_match.end() if own_prefix_match else 0
+        own_prefix_end = _heading_prefix_end(stripped_item_text)
         own_remainder = stripped_item_text[own_prefix_end:].lstrip(" :.-–—").strip()
         # Bare top-level numbering ("1. Maintain...") has no dot, so
         # combined_numbering_level can't score it -- without also
@@ -432,12 +594,36 @@ def build_structured_elements(document, pdf_path: str):
         # passed through unchecked whenever docling misclassified them.
         has_own_numbering = numbering_level is not None or bool(BARE_TOP_LEVEL_NUMBER_RE.match(stripped_item_text))
 
-        if is_heading:
+        if _is_toc_line(item_text):
+            if is_heading:
+                is_heading = False
+                label = "text"
+                log.info(
+                    f"TOC LINE VETOED page={item_page} "
+                    f"text='{item_text[:60]}' -> demoted, dot-leader + "
+                    f"trailing page number"
+                )
+        elif is_heading and _looks_like_sentence_not_heading(item_text):
+            # Independent of has_own_numbering below -- this is exactly
+            # what catches a lowercase list marker like "c) the
+            # composition of the strengths are quantitatively
+            # proportional..." that no numbering regex recognizes at
+            # all (deliberately -- see _lowercase_roman_prefix_end), and
+            # which the has_own_numbering-gated veto right below would
+            # therefore never even get a chance to look at.
+            is_heading = False
+            label = "text"
+            log.info(
+                f"SENTENCE-SHAPE VETO page={item_page} "
+                f"text='{item_text[:60]}' -> demoted, reads as a full "
+                f"sentence/clause, not a title"
+            )
+        elif is_heading:
             normalized_item_text = _normalize_for_dedup(item_text)
             if table_artifact_pool and normalized_item_text and normalized_item_text in table_artifact_pool:
                 is_heading = False
                 label = "text"
-            elif has_own_numbering:
+            elif has_own_numbering and not _is_strong_compound_numbering(numbering_scheme, numbering_level):
                 # Docling sometimes classifies "bold numbering + long
                 # regular-text sentence" as a genuine SectionHeaderItem
                 # (see D2.8.2 above) -- it isn't a heading, just a
@@ -447,6 +633,11 @@ def build_structured_elements(document, pdf_path: str):
                 # classification: if the bold styling doesn't cover the
                 # numbering/label as expected, this isn't a heading
                 # either, regardless of what docling called it.
+                #
+                # Skipped for strong compound numbering ("IV.1.1") for
+                # the same reason it bypasses the promotion check below
+                # -- that pattern is specific enough evidence on its own
+                # that a failed style check shouldn't override it.
                 bbox = prov_entries[0].bbox if prov_entries else None
                 page_obj = document.pages.get(item_page)
                 page_height = page_obj.size.height if page_obj and page_obj.size else None
@@ -462,21 +653,35 @@ def build_structured_elements(document, pdf_path: str):
                         f"doesn't cover the numbering/label as expected"
                     )
         elif label in ("list_item", "paragraph", "text"):
-            if has_own_numbering:
-                bbox = prov_entries[0].bbox if prov_entries else None
-                page_obj = document.pages.get(item_page)
-                page_height = page_obj.size.height if page_obj and page_obj.size else None
-                if page_height and _leading_bold_run_has_label(
-                    pdf_doc, item_page, bbox, page_height,
-                    require_label_text=bool(own_remainder),
-                ):
+            if has_own_numbering and not _looks_like_sentence_not_heading(item_text):
+                if _is_strong_compound_numbering(numbering_scheme, numbering_level):
+                    # Multi-segment compound numbering ("IV.1.1") is
+                    # strong enough evidence on its own -- promote
+                    # without requiring bold/italic confirmation. Some
+                    # PDF generators give a deep heading tier no
+                    # distinguishing style at all (styling isn't just
+                    # inconsistently detected here -- Docling's own
+                    # layout model saw nothing either), and gating
+                    # promotion on a style signal that genuinely doesn't
+                    # exist in the source silently drops the entire
+                    # tier no matter how the bold/italic check itself is
+                    # tuned.
                     is_heading = True
                 else:
-                    log.info(
-                        f"BOLD-RUN CHECK page={item_page} "
-                        f"page_height={page_height} bbox={bbox} "
-                        f"text='{item_text[:60]}' -> not promoted"
-                    )
+                    bbox = prov_entries[0].bbox if prov_entries else None
+                    page_obj = document.pages.get(item_page)
+                    page_height = page_obj.size.height if page_obj and page_obj.size else None
+                    if page_height and _leading_bold_run_has_label(
+                        pdf_doc, item_page, bbox, page_height,
+                        require_label_text=bool(own_remainder),
+                    ):
+                        is_heading = True
+                    else:
+                        log.info(
+                            f"BOLD-RUN CHECK page={item_page} "
+                            f"page_height={page_height} bbox={bbox} "
+                            f"text='{item_text[:60]}' -> not promoted"
+                        )
 
         if is_heading:
             # A roman root only counts as "open" if it hasn't already
@@ -488,6 +693,26 @@ def build_structured_elements(document, pdf_path: str):
                 and open_roman_root_level in current_hierarchy_context
                 else 0
             )
+            # A KEYWORD-opened root ("Appendix III", "Annex D") is a
+            # genuine container: bare numbering inside it (restarting
+            # its own local "I.", "II.", ... or "A.", "B.", ...
+            # sequence) is meant to nest one level under it. A
+            # BARE-opened root (plain "I. Primary heading" with no
+            # keyword) is NOT a container in the same sense -- a
+            # following bare-roman heading ("II. Second primary
+            # heading") is its SIBLING, not its child, which is why
+            # bare-roman is excluded below unless the open root is
+            # keyword-based.
+            root_is_keyword = open_root_scheme in ("keyword-roman", "keyword-letter")
+            # Tracks whether THIS heading was scored by nesting under an
+            # existing root, as opposed to opening a root of its own.
+            # Matters below: a bare-roman heading that got nested inside
+            # a keyword container must NOT then overwrite open_root_scheme
+            # with its own "bare-roman" -- doing so would make the
+            # container's root vanish the moment its first internal "I."
+            # is seen, kicking the very next sibling ("II.") back out to
+            # top level instead of staying nested beside "I.".
+            nested_under_root = False
 
             if numbering_level is not None:
                 if numbering_scheme is None:
@@ -518,6 +743,24 @@ def build_structured_elements(document, pdf_path: str):
                     # everything nested under it) from being folded
                     # into "Annex D"'s subtree.
                     level = roman_root_offset + 1
+                    nested_under_root = True
+                elif (
+                    numbering_scheme == "bare-roman"
+                    and roman_root_offset
+                    and root_is_keyword
+                ):
+                    # A bare roman-numeral heading ("I. Introduction")
+                    # immediately following a KEYWORD container
+                    # ("APPENDIX III") is that container's own internal
+                    # subsection sequence, restarting from I regardless
+                    # of the appendix's own number -- a very common
+                    # convention. Nest it one level under the container
+                    # instead of letting it replace the container as a
+                    # same-scheme "sibling" (which is right when the open
+                    # root is itself a bare "I." -- see root_is_keyword
+                    # above -- but wrong here).
+                    level = roman_root_offset + 1
+                    nested_under_root = True
                 else:
                     level = numbering_level
             elif isinstance(item, SectionHeaderItem):
@@ -535,10 +778,12 @@ def build_structured_elements(document, pdf_path: str):
             for k in [k for k in list(current_hierarchy_context) if k > level]:
                 del current_hierarchy_context[k]
 
-            if numbering_scheme in ("keyword-roman", "bare-roman"):
+            if numbering_scheme in ("keyword-roman", "bare-roman", "keyword-letter") and not nested_under_root:
                 open_roman_root_level = level
+                open_root_scheme = numbering_scheme
             elif open_roman_root_level is not None and level <= open_roman_root_level:
                 open_roman_root_level = None
+                open_root_scheme = None
 
         active_headings = [
             current_hierarchy_context[k] for k in sorted(current_hierarchy_context.keys())
