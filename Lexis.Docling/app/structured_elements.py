@@ -62,15 +62,77 @@ ANY_HEADING_PREFIX_RE = re.compile(
 )
 
 
-def combined_numbering_level(text: str) -> tuple[int | None, bool, str | None]:
+def classify_keyword_root_schemes(document) -> dict[str, str]:
+    """
+    Classify each keyword's (chapter/article/section/part/appendix/annex)
+    labeling scheme as "roman" or "letter", using ALL of that keyword's
+    occurrences across the whole document together -- not one heading
+    guessed in isolation.
+
+    A single-letter label like "Annex D" is structurally ambiguous by
+    itself: D, I, V, X, L, C, M are all simultaneously valid Roman
+    numeral characters AND valid plain letters. A per-heading check
+    (_is_valid_roman on that one token) has no way to tell them apart,
+    and picks wrong exactly when a document's own alphabetic sequence
+    (Annex A, B, C, D, E, F...) happens to pass through one of those
+    overloaded letters -- "Annex D" scores as Roman while its very next
+    sibling "Annex E" scores as a plain letter, even though they're the
+    same kind of label.
+
+    The document itself resolves the ambiguity: if the same keyword's
+    family contains ANY multi-character Roman numeral ("Chapter II",
+    "Chapter III"), that's unambiguous evidence of a genuine Roman
+    sequence. Otherwise -- every occurrence is a single character --
+    the family is treated as plain alphabetic labeling, which is by far
+    the more common convention for Annex/Appendix/Part lettering and
+    means every member of the family (including ones that happen to
+    look like valid Roman characters) is scored consistently.
+
+    A keyword with only one occurrence and no siblings to disambiguate
+    against defaults to "letter" for the same reason: a genuinely
+    Roman, non-sequential single letter ("Part D" as literal numeral
+    500, with no "Part I"/"Part II" anywhere else) is real but rare
+    compared to a lone alphabetic label.
+    """
+    tokens_by_keyword: dict[str, list[str]] = {}
+
+    for item, _ in document.iterate_items():
+        text = getattr(item, "text", "") or ""
+        match = KEYWORD_PREFIX_RE.match(text)
+        if not match:
+            continue
+        keyword = match.group(0).split()[0].lower()
+        token = match.group(1)
+        if token.isdigit():
+            continue
+        tokens_by_keyword.setdefault(keyword, []).append(token)
+
+    schemes = {}
+    for keyword, tokens in tokens_by_keyword.items():
+        if any(len(t) > 1 and _is_valid_roman(t) for t in tokens):
+            schemes[keyword] = "roman"
+        else:
+            schemes[keyword] = "letter"
+
+    return schemes
+
+
+def combined_numbering_level(
+    text: str,
+    keyword_schemes: dict[str, str] | None = None,
+) -> tuple[int | None, bool, str | None]:
     """
     Returns (level, is_alternate_scheme, scheme). `scheme` names which
     alternate path matched: "keyword-roman", "bare-roman",
     "keyword-decimal", "keyword-letter", "letter-compound",
     "section-symbol", "bare-letter", or None (pure decimal, or no match).
-    `scheme` is not currently consumed by build_structured_elements --
-    it's returned for callers that want to distinguish numbering styles
-    (e.g. future roman-root nesting) without needing another regex pass.
+
+    `keyword_schemes` is the output of classify_keyword_root_schemes --
+    a document-level roman/letter classification per keyword, used to
+    resolve the "Annex D" vs "Annex E" ambiguity described there. When
+    not supplied (e.g. a caller scoring a single heading with no
+    document context available), falls back to the old per-token
+    Roman-character check.
     """
     text = text.strip()
 
@@ -86,12 +148,17 @@ def combined_numbering_level(text: str) -> tuple[int | None, bool, str | None]:
     keyword_match = KEYWORD_PREFIX_RE.match(text)
     if keyword_match:
         token = keyword_match.group(1)
+        keyword_name = keyword_match.group(0).split()[0].lower()
         if token.isdigit():
             scheme = "keyword-decimal"
-        elif _is_valid_roman(token):
-            scheme = "keyword-roman"
         else:
-            scheme = "keyword-letter"
+            family_scheme = (keyword_schemes or {}).get(keyword_name)
+            is_roman = (
+                family_scheme == "roman"
+                if family_scheme is not None
+                else _is_valid_roman(token)
+            )
+            scheme = "keyword-roman" if is_roman else "keyword-letter"
         remainder = text[keyword_match.end():].lstrip(" :.-–—")
         remainder_level = numbering_depth_for_hierarchy(remainder)
         return (remainder_level, True, scheme) if remainder_level is not None else (1, True, scheme)
@@ -105,7 +172,19 @@ def combined_numbering_level(text: str) -> tuple[int | None, bool, str | None]:
     if roman_match and _is_valid_roman(roman_match.group(1)):
         return 1, True, "bare-roman"
 
-    if BARE_LETTER_HEADING_RE.match(text):
+    bare_letter_match = BARE_LETTER_HEADING_RE.match(text)
+    if bare_letter_match:
+        # 1-2 letter tokens are ambiguous: I, V, X, L, C, D, M (and valid
+        # combos like II, IV, IX, XI, ...) are simultaneously valid
+        # roman numerals AND valid annex-style bare letters.
+        # BARE_ROMAN_HEADING_RE alone can't catch these (3+ letters
+        # only), so without this check "I. Main Heading" resolved to the
+        # same scheme as "A. Subheading" -- nothing told open-root
+        # tracking that "I." was a roman root. Letters with no valid
+        # roman reading (A, B, E, F, G, H, J, K, N, ...) are unaffected.
+        token = bare_letter_match.group(1)
+        if _is_valid_roman(token):
+            return 1, True, "bare-roman"
         return 1, True, "bare-letter"
 
     return None, False, None
@@ -193,7 +272,9 @@ def _normalize_for_dedup(text: str) -> str:
 BOLD_LABEL_TERMINATOR_RE = re.compile(r"(?<=\w{2})[.:;,](?=\s|$)|\s*[-–—]\s*(?!\w)|(?<!\w)\s*[-–—]\s*")
 
 
-def _leading_bold_run_has_label(pdf_doc, page_no: int, bbox, page_height: float) -> bool:
+def _leading_bold_run_has_label(
+    pdf_doc, page_no: int, bbox, page_height: float, *, require_label_text: bool = True
+) -> bool:
     """
     Does the leading bold run inside this item's own bbox extend past
     its numbering into real label text?
@@ -204,6 +285,21 @@ def _leading_bold_run_has_label(pdf_doc, page_no: int, bbox, page_height: float)
     a given page -- correct for any PDF regardless of layout density,
     since it never depends on fitz's block boundaries lining up with
     Docling's.
+
+    require_label_text controls what counts as evidence:
+    - True (default): the bold run must extend past the numbering into
+      real trailing text WITHIN THIS BLOCK. Used when item_text itself
+      already contains that trailing text (e.g. "D2.8.2 In addition to
+      the general report requirements..." -- number + a full sentence
+      bundled in one block). If the bold styling stops right after the
+      number, this is a numbered clause/list item wrongly classified as
+      a heading, not a real one.
+    - False: the numbering itself being bold is enough. Used when
+      item_text is JUST the number/keyword with no trailing content at
+      all (e.g. "ARTICLE V", title "MEETINGS AND PROCEDURES" given as a
+      separate following heading block) -- there is no label to check
+      boldness on within this block, so requiring one would always fail
+      and permanently block a legitimate numbering-only heading.
     """
     if bbox is None:
         return False
@@ -232,12 +328,6 @@ def _leading_bold_run_has_label(pdf_doc, page_no: int, bbox, page_height: float)
         is_bold_span = "bold" in font_name or "black" in font_name
 
         if not is_bold_span:
-            # A whitespace-only span reporting non-bold is almost always
-            # a PyMuPDF font-metadata artifact on the gap between two
-            # real bold runs (e.g. between "3.1" and "Annual"), not an
-            # actual style break -- don't let it terminate the scan.
-            # Only a non-bold span with real (non-whitespace) content
-            # means the bold run has genuinely ended.
             if span_text.strip() == "":
                 bold_prefix_text += span_text
                 continue
@@ -245,18 +335,13 @@ def _leading_bold_run_has_label(pdf_doc, page_no: int, bbox, page_height: float)
 
         bold_prefix_text += span_text
 
-        # Stop at the label's own terminating punctuation, even if the
-        # font is still reporting bold past it (trailing bold space, or
-        # a PDF that bolds the whole first sentence/clause). Without
-        # this, a heading like "3.1 Annual Recognition Solicitation: The
-        # recognition process..." or "3.1 Scope, Purpose, and Field..."
-        # -- where bold styling runs well past the actual label -- would
-        # swallow everything up to the next non-bold span instead of
-        # stopping at the label's own punctuation.
         terminator_match = BOLD_LABEL_TERMINATOR_RE.search(bold_prefix_text)
         if terminator_match:
             bold_prefix_text = bold_prefix_text[: terminator_match.end()]
             break
+
+    if not require_label_text:
+        return len(bold_prefix_text.strip()) > 0
 
     remainder = ANY_HEADING_PREFIX_RE.sub("", bold_prefix_text, count=1).lstrip(".:-–— ,;").strip()
     return len(remainder) > 0
@@ -293,9 +378,22 @@ def build_structured_elements(document, pdf_path: str):
     # level -> heading text, representing the currently "open" hierarchy path
     current_hierarchy_context = {} 
     table_artifact_pool = ""
+    # Level of the currently-open roman-numeral root (e.g. "I. Main
+    # Heading"), or None. Bare-letter/decimal children have no lexical
+    # tie back to their roman parent, so left alone they score their own
+    # hardcoded/absolute level and collide with the root, evicting it
+    # from current_hierarchy_context. See usage below.
+    open_roman_root_level = None
     
     pdf_doc = fitz.open(pdf_path)
-    
+
+    # Document-level roman-vs-letter classification per keyword (see
+    # classify_keyword_root_schemes docstring) -- computed once up
+    # front so every heading of the same keyword (e.g. every "Annex X")
+    # is scored consistently, instead of each one guessing in isolation
+    # from its own single letter.
+    keyword_schemes = classify_keyword_root_schemes(document)
+
     for item, _docling_level in document.iterate_items():
         prov_entries = getattr(item, "prov", None)
         if not prov_entries:
@@ -307,46 +405,73 @@ def build_structured_elements(document, pdf_path: str):
          
 
         is_heading = isinstance(item, SectionHeaderItem)
-        # combined_numbering_level now returns a 3-tuple (level,
-        # is_alternate_scheme, scheme); scheme is unused here since
-        # roman-root parent nesting is intentionally left out of this
-        # version -- kept simple, matching the original behavior.
-        numbering_level, is_alternate_scheme, _numbering_scheme = combined_numbering_level(item_text)
+        # combined_numbering_level returns a 3-tuple (level,
+        # is_alternate_scheme, scheme). scheme drives the Roman-root
+        # nesting logic below (open_roman_root_level / roman_root_offset),
+        # and is now resolved using the document-level keyword_schemes
+        # classification rather than a per-heading isolated guess.
+        numbering_level, is_alternate_scheme, numbering_scheme = combined_numbering_level(
+            item_text, keyword_schemes
+        )
+        
+                # Does item_text itself carry label content beyond its own
+        # numbering? A block that is JUST a number/keyword ("ARTICLE V",
+        # "1.") -- title given as a SEPARATE following heading -- has no
+        # remainder of its own. A block bundling numbering AND a full
+        # sentence in ONE block ("D2.8.2 In addition to...") does. Both
+        # the promotion and veto checks below key off this distinction,
+        # via require_label_text on _leading_bold_run_has_label.
+        stripped_item_text = item_text.strip()
+        own_prefix_match = ANY_HEADING_PREFIX_RE.match(stripped_item_text)
+        own_prefix_end = own_prefix_match.end() if own_prefix_match else 0
+        own_remainder = stripped_item_text[own_prefix_end:].lstrip(" :.-–—").strip()
+        # Bare top-level numbering ("1. Maintain...") has no dot, so
+        # combined_numbering_level can't score it -- without also
+        # checking BARE_TOP_LEVEL_NUMBER_RE here, numbered list items
+        # like this were invisible to the veto below entirely and
+        # passed through unchecked whenever docling misclassified them.
+        has_own_numbering = numbering_level is not None or bool(BARE_TOP_LEVEL_NUMBER_RE.match(stripped_item_text))
 
         if is_heading:
             normalized_item_text = _normalize_for_dedup(item_text)
             if table_artifact_pool and normalized_item_text and normalized_item_text in table_artifact_pool:
                 is_heading = False
                 label = "text"
-            elif numbering_level is not None:
+            elif has_own_numbering:
                 # Docling sometimes classifies "bold numbering + long
                 # regular-text sentence" as a genuine SectionHeaderItem
                 # (see D2.8.2 above) -- it isn't a heading, just a
                 # numbered clause whose leading digits happen to render
                 # bold. Run the same bold-run check used to PROMOTE plain
                 # text into a heading, here as a VETO on docling's own
-                # classification: if the bold styling doesn't extend past
-                # the numbering into real label text, this isn't a
-                # heading either, regardless of what docling called it.
+                # classification: if the bold styling doesn't cover the
+                # numbering/label as expected, this isn't a heading
+                # either, regardless of what docling called it.
                 bbox = prov_entries[0].bbox if prov_entries else None
                 page_obj = document.pages.get(item_page)
                 page_height = page_obj.size.height if page_obj and page_obj.size else None
-                if page_height and not _leading_bold_run_has_label(pdf_doc, item_page, bbox, page_height):
+                if page_height and not _leading_bold_run_has_label(
+                    pdf_doc, item_page, bbox, page_height,
+                    require_label_text=bool(own_remainder),
+                ):
                     is_heading = False
                     label = "text"
                     log.info(
                         f"DOCLING HEADING VETOED page={item_page} "
                         f"text='{item_text[:60]}' -> demoted, bold run "
-                        f"doesn't extend past numbering"
-                    ) 
+                        f"doesn't cover the numbering/label as expected"
+                    )
         elif label in ("list_item", "paragraph", "text"):
-            if numbering_level is not None:
+            if has_own_numbering:
                 bbox = prov_entries[0].bbox if prov_entries else None
                 page_obj = document.pages.get(item_page)
                 page_height = page_obj.size.height if page_obj and page_obj.size else None
-                if page_height and _leading_bold_run_has_label(pdf_doc, item_page, bbox, page_height):
+                if page_height and _leading_bold_run_has_label(
+                    pdf_doc, item_page, bbox, page_height,
+                    require_label_text=bool(own_remainder),
+                ):
                     is_heading = True
-                elif numbering_level is not None:
+                else:
                     log.info(
                         f"BOLD-RUN CHECK page={item_page} "
                         f"page_height={page_height} bbox={bbox} "
@@ -354,33 +479,66 @@ def build_structured_elements(document, pdf_path: str):
                     )
 
         if is_heading:
-            # Numbering depth is the one scale that's consistent across
-            # the whole document -- Docling's own item.level isn't
-            # reliable enough to key the hierarchy dict on (it has
-            # assigned the same raw level to a chapter and one of that
-            # chapter's own numbered subsections, silently overwriting
-            # the parent in current_hierarchy_context).
+            # A roman root only counts as "open" if it hasn't already
+            # been evicted from current_hierarchy_context by something
+            # else taking its slot.
+            roman_root_offset = (
+                open_roman_root_level
+                if open_roman_root_level is not None
+                and open_roman_root_level in current_hierarchy_context
+                else 0
+            )
+
             if numbering_level is not None:
-                level = numbering_level
+                if numbering_scheme is None:
+                    # Standard legal-outline convention: Roman > Letter >
+                    # Number (I. > A. > 1.). Bare-decimal under an open
+                    # roman root nests one level DEEPER than bare-letter
+                    # under the same root -- e.g. "1. Tertiary heading"
+                    # sits under "B. Another secondary heading", which
+                    # sits under "I. Primary heading". Confirmed
+                    # structure, not a per-document guess.
+                    level = (
+                        numbering_level + roman_root_offset + 1
+                        if roman_root_offset
+                        else numbering_level
+                    )
+                elif numbering_scheme == "bare-letter" and roman_root_offset:
+                    # Only a BARE letter ("A. Secondary heading", no
+                    # keyword) is eligible for this offset. A
+                    # keyword-prefixed letter heading ("Annex E",
+                    # "Appendix F") is self-declaring its own position
+                    # via the keyword itself and must never silently
+                    # inherit an offset from an unrelated open Roman
+                    # root -- whether that root is a genuine bare "I."
+                    # or a same-keyword sibling that was itself
+                    # misread as Roman (e.g. "Annex D", where D is also
+                    # a valid Roman numeral character). Excluding
+                    # keyword-letter here is what stops "Annex E" (and
+                    # everything nested under it) from being folded
+                    # into "Annex D"'s subtree.
+                    level = roman_root_offset + 1
+                else:
+                    level = numbering_level
             elif isinstance(item, SectionHeaderItem):
-                # Bare top-level titles like "1. Program Summary" have no
-                # decimal, so numbering_depth_for_hierarchy can't score
-                # them -- without this they fall back to Docling's own
-                # item.level, which can coincide with a numbered child's
-                # level (e.g. both land on 2) and get silently overwritten.
-                level = 1 if BARE_TOP_LEVEL_NUMBER_RE.match(item_text.strip()) else item.level
+                if BARE_TOP_LEVEL_NUMBER_RE.match(item_text.strip()):
+                    # Same Roman > Letter > Number convention as above,
+                    # for the bare-top-level-number path (no dot).
+                    level = (roman_root_offset + 2) if roman_root_offset else 1
+                else:
+                    level = item.level
             else:
                 level = 1
 
-            # Always derive a short label -- Docling itself sometimes
-            # classifies a bold lead-in + long trailing paragraph as a
-            # genuine SectionHeaderItem (see 2.9, 2.12), not just our
-            # own numbering-fallback promotions.
             heading_label = derive_heading_label(item_text)
-
             current_hierarchy_context[level] = heading_label
             for k in [k for k in list(current_hierarchy_context) if k > level]:
                 del current_hierarchy_context[k]
+
+            if numbering_scheme in ("keyword-roman", "bare-roman"):
+                open_roman_root_level = level
+            elif open_roman_root_level is not None and level <= open_roman_root_level:
+                open_roman_root_level = None
 
         active_headings = [
             current_hierarchy_context[k] for k in sorted(current_hierarchy_context.keys())
