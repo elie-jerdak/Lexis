@@ -400,19 +400,70 @@ def _normalize_for_dedup(text: str) -> str:
 BOLD_LABEL_TERMINATOR_RE = re.compile(r"(?<=\w{2})[.:;,](?=\s|$)|\s*[-–—]\s*(?!\w)|(?<!\w)\s*[-–—]\s*")
 
 
+def _compute_baseline_font_size(pdf_doc) -> float | None:
+    """
+    Most heading conventions signal a heading via a LARGER font size --
+    at least as common as, and often used instead of, bold or italic.
+    _leading_bold_run_has_label previously had no visibility into this
+    at all, which silently failed every numbered heading in a document
+    whose only heading signal is size (e.g. an academic paper's
+    "1 Introduction", "2 Overview" -- Docling's own layout model
+    doesn't classify them as SectionHeaderItem either, per elementType
+    "text" in the actual output, so this isn't a detection gap on our
+    side alone; there's a real size difference in the PDF that nothing
+    was looking at).
+
+    Computes the single most common font size across the WHOLE document
+    (weighted by character count) as a stand-in for "body text size".
+    Body text dominates by volume in virtually any real document, so
+    the mode is a robust, self-calibrating baseline that needs no
+    per-document tuning -- unlike a fixed pt threshold, which would be
+    wrong for a document set in 9pt vs one set in 12pt.
+    """
+    from collections import Counter
+
+    sizes: Counter = Counter()
+    for page in pdf_doc:
+        page_dict = page.get_text("dict")
+        for block in page_dict.get("blocks", []):
+            if block.get("type") != 0:
+                continue
+            for line in block.get("lines", []):
+                for span in line.get("spans", []):
+                    text = span.get("text", "")
+                    if text.strip():
+                        # Round to the nearest 0.5pt to absorb tiny
+                        # rendering jitter within an otherwise-uniform
+                        # body size (fractional-pt noise would otherwise
+                        # split one true body size into many near-
+                        # duplicate buckets and undercount its mode).
+                        rounded_size = round(span.get("size", 0) * 2) / 2
+                        sizes[rounded_size] += len(text)
+
+    if not sizes:
+        return None
+    return sizes.most_common(1)[0][0]
+
+
 def _leading_bold_run_has_label(
-    pdf_doc, page_no: int, bbox, page_height: float, *, require_label_text: bool = True
+    pdf_doc, page_no: int, bbox, page_height: float, *,
+    require_label_text: bool = True,
+    baseline_font_size: float | None = None,
 ) -> bool:
     """
     Does the leading distinctively-styled run inside this item's own
     bbox extend past its numbering into real label text?
 
-    "Distinctive style" means bold OR italic (see is_distinctive_span
-    below) -- not every template marks headings with bold. A generated
-    template observed in practice styles its top two heading tiers
-    bold and its third tier in italics only; treating bold as the only
-    valid signal made every one of those italic headings read as
-    "no distinguishing style at all" and get silently dropped.
+    "Distinctive style" means bold, italic, OR a font size notably
+    larger than the document's body-text baseline (see
+    is_distinctive_span below and _compute_baseline_font_size) -- not
+    every template marks headings with weight or slant at all. A
+    generated template observed in practice styles its top two heading
+    tiers bold and its third tier in italics only; treating bold as the
+    only valid signal made every one of those italic headings read as
+    "no distinguishing style at all" and get silently dropped. Font
+    size is the same story for documents whose ONLY heading signal is
+    size (common in academic/journal layouts).
 
     Uses PyMuPDF's `clip` to restrict extraction to the item's exact
     bbox, rather than matching against whole-page blocks/lines. This
@@ -461,12 +512,24 @@ def _leading_bold_run_has_label(
         span_text = span.get("text", "")
         font_name = span.get("font", "").lower()
         flags = span.get("flags", 0)
+        span_size = span.get("size", 0)
         # A heading's distinguishing style isn't always bold -- some
         # templates mark lower tiers with italics instead (or in
-        # addition). flags is PyMuPDF's bitfield (bit 4 / value 16 =
-        # bold, bit 1 / value 2 = italic); the font-name substring
-        # check is kept as a fallback for fonts that don't set flags
-        # reliably.
+        # addition), and some use neither, relying only on a larger
+        # font size (common in academic/journal layouts). flags is
+        # PyMuPDF's bitfield (bit 4 / value 16 = bold, bit 1 / value 2 =
+        # italic); the font-name substring check is kept as a fallback
+        # for fonts that don't set flags reliably. The size comparison
+        # requires a real baseline and a size that's NOTABLY larger --
+        # both an absolute (>=1pt) and a relative (>=10%) margin, so
+        # ordinary rendering jitter in body text doesn't get read as a
+        # heading signal.
+        is_larger_than_body = (
+            baseline_font_size is not None
+            and span_size > 0
+            and span_size - baseline_font_size >= 1.0
+            and span_size >= baseline_font_size * 1.1
+        )
         is_distinctive_span = (
             "bold" in font_name
             or "black" in font_name
@@ -474,6 +537,7 @@ def _leading_bold_run_has_label(
             or "oblique" in font_name
             or bool(flags & 16)
             or bool(flags & 2)
+            or is_larger_than_body
         )
 
         if not is_distinctive_span:
@@ -556,6 +620,13 @@ def build_structured_elements(document, pdf_path: str):
     # is scored consistently, instead of each one guessing in isolation
     # from its own single letter.
     keyword_schemes = classify_keyword_root_schemes(document)
+
+    # Document-wide body-text font size (see _compute_baseline_font_size
+    # docstring) -- computed once up front so every heading candidate is
+    # compared against the same baseline, and documents whose only
+    # heading signal is size (no bold/italic at all) aren't silently
+    # dropped in their entirety.
+    baseline_font_size = _compute_baseline_font_size(pdf_doc)
 
     for item, _docling_level in document.iterate_items():
         prov_entries = getattr(item, "prov", None)
@@ -644,6 +715,7 @@ def build_structured_elements(document, pdf_path: str):
                 if page_height and not _leading_bold_run_has_label(
                     pdf_doc, item_page, bbox, page_height,
                     require_label_text=bool(own_remainder),
+                    baseline_font_size=baseline_font_size,
                 ):
                     is_heading = False
                     label = "text"
@@ -674,6 +746,7 @@ def build_structured_elements(document, pdf_path: str):
                     if page_height and _leading_bold_run_has_label(
                         pdf_doc, item_page, bbox, page_height,
                         require_label_text=bool(own_remainder),
+                        baseline_font_size=baseline_font_size,
                     ):
                         is_heading = True
                     else:
@@ -714,7 +787,30 @@ def build_structured_elements(document, pdf_path: str):
             # top level instead of staying nested beside "I.".
             nested_under_root = False
 
-            if numbering_level is not None:
+            if numbering_level is not None and not (
+                isinstance(item, SectionHeaderItem)
+                and numbering_scheme == "letter-compound"
+                and (lc_match := LETTER_NUMBER_COMPOUND_RE.match(item_text.strip()))
+                and len(lc_match.group("letter")) >= 3
+            ):
+                # The "and not (...)" guard: LETTER_NUMBER_COMPOUND_RE's
+                # letter group was widened from {1,2} to {1,4} chars to
+                # catch multi-letter roman prefixes ("VIII.2 Something")
+                # on headings Docling does NOT classify as headings at
+                # all (e.g. "IV.1.1 General aspects" -- confirmed via
+                # elementType "text" -- Docling's own layout model saw
+                # no distinguishing style for that tier either, so this
+                # is the ONLY signal available). But when the item IS
+                # already a genuine SectionHeaderItem Docling classified
+                # AND leveled correctly on its own ("III.1 Solubility"),
+                # our simpler letter+number heuristic isn't more
+                # trustworthy than Docling's own established level --
+                # overriding it here silently evicted "III. Drug
+                # Substance" from "III.1 Solubility"'s headingPath the
+                # moment the regex widened to recognize "III" as a
+                # letter group. Only 3+ character letter groups trigger
+                # this guard; 1-2 character matches ("E.1 Scope") are
+                # the original, already-validated behavior.
                 if numbering_scheme is None:
                     # Standard legal-outline convention: Roman > Letter >
                     # Number (I. > A. > 1.). Bare-decimal under an open
@@ -763,13 +859,23 @@ def build_structured_elements(document, pdf_path: str):
                     nested_under_root = True
                 else:
                     level = numbering_level
+            elif BARE_TOP_LEVEL_NUMBER_RE.match(item_text.strip()):
+                # Same Roman > Letter > Number convention as above, for
+                # the bare-top-level-number path (no dot, no separator
+                # at all -- "1 Introduction", not "1. Introduction").
+                # Applies whether this heading was already a
+                # SectionHeaderItem from Docling, or was PROMOTED from
+                # plain text/list_item via the numbering-fallback tier
+                # above: has_own_numbering already recognizes this
+                # pattern for promotion eligibility (BARE_TOP_LEVEL_
+                # NUMBER_RE's trailing dot is optional), but this check
+                # used to only be reachable via the isinstance branch
+                # below -- a promoted bare-number heading isn't really a
+                # SectionHeaderItem instance, so it fell through to a
+                # hardcoded level=1 regardless of nesting context.
+                level = (roman_root_offset + 2) if roman_root_offset else 1
             elif isinstance(item, SectionHeaderItem):
-                if BARE_TOP_LEVEL_NUMBER_RE.match(item_text.strip()):
-                    # Same Roman > Letter > Number convention as above,
-                    # for the bare-top-level-number path (no dot).
-                    level = (roman_root_offset + 2) if roman_root_offset else 1
-                else:
-                    level = item.level
+                level = item.level
             else:
                 level = 1
 
