@@ -1,5 +1,6 @@
 using Lexis.API.Data;
 using Lexis.Core.BackgroundServices;
+using Lexis.Core.DTOs.TableContinuation;
 using Lexis.Core.Enums;
 using Lexis.Core.Helpers;
 using Lexis.Core.Interfaces;
@@ -96,7 +97,7 @@ builder.Services.AddHttpClient<IDocumentExtractionService, DoclingExtractionServ
 {
     //client.BaseAddress = new Uri("http://docling:8000/"); use docker-compose on the yaml file
     client.BaseAddress = new Uri("http://host.docker.internal:8000/");
-    client.Timeout = TimeSpan.FromMinutes(5);
+    client.Timeout = TimeSpan.FromMinutes(235);
 });
 
 builder.Services.AddScoped<IJwtService, JwtService>();
@@ -111,6 +112,11 @@ builder.Services.AddScoped<IDocumentProcessingService, DocumentProcessingService
 builder.Services.AddScoped<ITextCleaningService, TextCleaningService>(); 
 builder.Services.AddScoped<IDocumentPreprocessingService, DocumentPreprocessingService>();
 builder.Services.AddScoped<IDocumentStructureService, DocumentStructureService>();
+builder.Services.AddScoped<IDocumentChunkingService, DocumentChunkingService>();
+builder.Services.AddScoped<IDocumentChunkRepository, DocumentChunkRepository>();
+builder.Services.AddScoped<ITableContinuationService, TableContinuationService>();
+builder.Services.AddScoped<TableContinuationHelpers>();
+builder.Services.AddScoped<TableContinuationAnalyzer>();
 
 var app = builder.Build();
 

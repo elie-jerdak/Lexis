@@ -4,6 +4,7 @@ from typing import Any
 
 from docling_core.types.doc.document import SectionHeaderItem
 from docling_core.types.doc import BoundingBox, CoordOrigin, ProvenanceItem
+from docling_core.types.doc.document import TableItem
 
 from app.logging_config import log
 
@@ -560,52 +561,13 @@ class HybridHeadingInferenceService:
 
         return 1
     
-    # def infer_and_correct(self, document):
-    #     """
-    #     Run the complete hybrid heading analysis.
-
-    #     1. Collect headings recognized by Docling.
-    #     2. Collect headings represented in Markdown.
-    #     3. Match both representations.
-    #     4. Correct Docling SectionHeaderItem.level.
-    #     """
-
-    #     existing_headings = self.find_existing_headings(
-    #         document
-    #     )
-
-    #     markdown_headings = self.find_markdown_headings(
-    #         document
-    #     )
-
-    #     (
-    #         matched,
-    #         unmatched_markdown,
-    #         corrected_count,
-    #     ) = self.compare_heading_sources(
-    #         existing_headings,
-    #         markdown_headings,
-    #     )
-
-    #     return {
-    #         "existing": existing_headings,
-    #         "markdown": markdown_headings,
-    #         "matched": matched,
-    #         "unmatched_markdown": unmatched_markdown,
-    #         "corrected_count": corrected_count,
-    #     }
-    
-    def infer_and_correct(
-        self,
-        document,
-        pdf_path: str,
-    ): 
+    def infer_and_correct(self, document, pdf_path: str,): 
 
         existing_headings = self.find_existing_headings(document)
 
         markdown_headings = self.find_markdown_headings(document)
 
-        inline_headings = (self.extract_inline_heading_candidates(pdf_path))
+        inline_headings = self.extract_inline_heading_candidates(pdf_path, document=document)
 
         (
             matched,
@@ -715,62 +677,50 @@ class HybridHeadingInferenceService:
 
         return True
 
-    def extract_inline_heading_candidates(
-        self,
-        pdf_path: str,
-    ):
+    def extract_inline_heading_candidates(self, pdf_path: str, document=None,):
         """
         Detect unnumbered headings directly from PDF text blocks.
 
         This is an additional signal and does not replace Docling,
         Markdown, or numbered-heading detection.
+
+        When `document` is provided, candidates whose bounding box falls
+        inside a Docling-recognized table on the same page are excluded --
+        see _collect_table_bboxes for why.
         """
 
         import fitz
 
         candidates = []
 
+        table_bboxes_by_page = (
+            self._collect_table_bboxes(document) if document is not None else {}
+        )
+
         pdf = fitz.open(pdf_path)
 
         for page_index, page in enumerate(pdf):
 
             page_no = page_index + 1
+            page_table_bboxes = table_bboxes_by_page.get(page_no, [])
 
-            blocks = page.get_text(
-                "dict"
-            ).get("blocks", [])
-
-            # -----------------------------------------------------
-            # Collect body font statistics for this page
-            # -----------------------------------------------------
+            blocks = page.get_text("dict").get("blocks", [])
 
             font_sizes = []
 
             for block in blocks:
-                block_bbox = block.get("bbox")  # fitz gives (x0, y0, x1, y1), top-left origin
-                
                 if block.get("type") != 0:
                     continue
-
                 for line in block.get("lines", []):
-
                     for span in line.get("spans", []):
-
                         size = span.get("size")
-
                         if size:
                             font_sizes.append(size)
 
             if not font_sizes:
                 continue
 
-            body_font_size = self.most_common_font_size(
-                font_sizes
-            )
-
-            # -----------------------------------------------------
-            # Inspect text blocks
-            # -----------------------------------------------------
+            body_font_size = self.most_common_font_size(font_sizes)
 
             for block in blocks:
 
@@ -781,57 +731,35 @@ class HybridHeadingInferenceService:
 
                 if not lines:
                     continue
-                
+
                 block_bbox = block.get("bbox")
-                
+
                 block_text_parts = []
                 block_font_sizes = []
                 block_is_bold = False
 
                 for line in lines:
-
                     for span in line.get("spans", []):
-
                         text = span.get("text", "")
-
                         if not text.strip():
                             continue
-
                         block_text_parts.append(text)
-
                         if span.get("size") is not None:
-                            block_font_sizes.append(
-                                span["size"]
-                            )
-
-                        font_name = (
-                            span.get("font", "")
-                            .lower()
-                        )
-
-                        if (
-                            "bold" in font_name
-                            or "black" in font_name
-                        ):
+                            block_font_sizes.append(span["size"])
+                        font_name = span.get("font", "").lower()
+                        if "bold" in font_name or "black" in font_name:
                             block_is_bold = True
 
-                text = " ".join(
-                    block_text_parts
-                ).strip()
+                text = " ".join(block_text_parts).strip()
 
                 if not text:
                     continue
-
-                # -------------------------------------------------
-                # Ignore numbered headings here.
-                # -------------------------------------------------
 
                 if self.is_numbered_heading_candidate(text):
                     continue
 
                 avg_font_size = (
-                    sum(block_font_sizes)
-                    / len(block_font_sizes)
+                    sum(block_font_sizes) / len(block_font_sizes)
                     if block_font_sizes
                     else None
                 )
@@ -842,6 +770,9 @@ class HybridHeadingInferenceService:
                     body_font_size=body_font_size,
                     is_bold=block_is_bold,
                 ):
+                    continue
+
+                if block_bbox and self._bbox_inside_any(block_bbox, page_table_bboxes):
                     continue
 
                 candidate = HeadingCandidate(
@@ -857,10 +788,9 @@ class HybridHeadingInferenceService:
                 )
 
                 candidates.append(candidate)
- 
 
         pdf.close()
-  
+
         return candidates
 
     @staticmethod
@@ -1011,12 +941,71 @@ class HybridHeadingInferenceService:
             preceding = (anchor_page, anchor_y, anchor_level, anchor_item)
         return preceding
     
-    def infer_and_insert_inline_headings(
-        self,
-        document,
-        unmatched_inline,
-        existing_headings,
-    ):
+    def _collect_table_bboxes(self, document) -> dict[int, list[tuple[float, float, float, float]]]:
+        """
+        Page -> list of (x0, top, x1, bottom) bounding boxes, top-left
+        origin, for every TableItem Docling recognized in the document.
+        Used to exclude inline heading candidates that actually live
+        inside a table's own content -- see extract_inline_heading_candidates.
+        A bold, short, run-in label organizing prose WITHIN a table cell
+        (e.g. "Thickness" / "Weight" as sub-topic markers inside a value
+        column) can satisfy every font/length/punctuation heuristic this
+        class uses just as well as a genuine document heading does --
+        geometry like font size or line spacing doesn't reliably tell them
+        apart. What does is structural: it's inside a table, which is
+        never part of the document's own heading hierarchy, regardless of
+        how the table happens to style its cell content.
+        """
+        bboxes_by_page: dict[int, list[tuple[float, float, float, float]]] = {}
+
+        for item, _ in document.iterate_items():
+            if not isinstance(item, TableItem):
+                continue
+
+            for prov in getattr(item, "prov", None) or []:
+                bbox = prov.bbox
+                page = document.pages.get(prov.page_no)
+                page_height = page.size.height if page and page.size else None
+
+                if bbox.coord_origin == CoordOrigin.BOTTOMLEFT and page_height:
+                    bbox = bbox.to_top_left_origin(page_height)
+
+                bboxes_by_page.setdefault(prov.page_no, []).append(
+                    (bbox.l, bbox.t, bbox.r, bbox.b)
+                )
+
+        return bboxes_by_page
+
+    @staticmethod
+    def _bbox_inside_any(
+        candidate_bbox: tuple[float, float, float, float],
+        container_bboxes: list[tuple[float, float, float, float]],
+        *,
+        min_overlap_ratio: float = 0.6,
+    ) -> bool:
+        """
+        True if candidate_bbox overlaps any container bbox by at least
+        min_overlap_ratio of its own area. A ratio, not exact containment,
+        tolerates minor coordinate differences between Docling's table
+        bbox and PyMuPDF's own block bbox for the same visual content.
+        """
+        cx0, cy0, cx1, cy1 = candidate_bbox
+        candidate_area = max(0.0, cx1 - cx0) * max(0.0, cy1 - cy0)
+
+        if candidate_area <= 0:
+            return False
+
+        for bx0, by0, bx1, by1 in container_bboxes:
+            ix0, iy0 = max(cx0, bx0), max(cy0, by0)
+            ix1, iy1 = min(cx1, bx1), min(cy1, by1)
+            overlap_area = max(0.0, ix1 - ix0) * max(0.0, iy1 - iy0)
+
+            if overlap_area / candidate_area >= min_overlap_ratio:
+                return True
+
+        return False
+
+    def infer_and_insert_inline_headings(self, document, unmatched_inline, existing_headings,):
         """
         Inline headings Docling never recognized get level =
         nearest preceding numbered/markdown heading's level + 1
@@ -1024,10 +1013,7 @@ class HybridHeadingInferenceService:
         as real SectionHeaderItem nodes.
         """
 
-        anchors = self.build_heading_anchors(
-            existing_headings,
-            document,
-        )
+        anchors = self.build_heading_anchors(existing_headings, document,)
 
         # Chain insertions so multiple inline headings under the same
         # anchor stay in their own relative order.

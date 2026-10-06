@@ -5,6 +5,7 @@
         Pending,
         Processing,
         Indexed,
+        Chunked,
         Failed
     }
 }

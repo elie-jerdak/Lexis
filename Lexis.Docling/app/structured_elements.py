@@ -71,6 +71,32 @@ def _looks_like_sentence_not_heading(text: str) -> bool:
     return False
 
 
+PAGE_NUMBER_ONLY_RE = re.compile(r"^\s*(?:page\s+)?[-–—]?\s*\d+\s*[-–—]?\s*$", re.IGNORECASE)
+
+
+def _is_bare_page_number(text: str) -> bool:
+    """
+    A heading whose ENTIRE text is nothing but a bare integer
+    (optionally decorated -- "45", "Page 45", "- 45 -") is virtually
+    never a genuine heading. Real numbering-only headings always carry
+    either an explicit keyword ("ARTICLE V") or a title in the SAME or
+    an adjacent block; a lone bare number with nothing else at all is a
+    page-footer/header artifact that Docling's font/layout clustering
+    occasionally mis-promotes to a SectionHeaderItem -- it's often
+    isolated on its own line, which looks structurally similar to a
+    real heading even though the content itself says nothing.
+
+    This needs its own check because a bare number FAILS has_own_
+    numbering entirely (BARE_TOP_LEVEL_NUMBER_RE requires trailing text
+    after the digits, which a page number by definition doesn't have)
+    and is far too short to trip the sentence-shape or TOC-line checks
+    -- without this, it sails through every existing safety net with
+    zero scrutiny, and Docling calling it a heading is the only signal
+    anywhere in the pipeline.
+    """
+    return bool(PAGE_NUMBER_ONLY_RE.match(text.strip()))
+
+
 def _is_strong_compound_numbering(numbering_scheme: str | None, numbering_level: int | None) -> bool:
     """
     Multi-SEGMENT compound numbering ("IV.1.1", "4.1.2") is specific,
@@ -572,6 +598,65 @@ def _leading_bold_run_has_label(
     remainder = bold_prefix_text[_heading_prefix_end(bold_prefix_text):].lstrip(".:-–— ,;").strip()
     return len(remainder) > 0
 
+
+def _table_column_count(markdown_content: str | None) -> int | None:
+    """
+    Counts columns from the first real (non-separator) row of a table's
+    exported markdown. Used as a corroborating signal for cross-page
+    table continuation: two page-split fragments of the same logical
+    table almost always have the same column count, WHETHER OR NOT the
+    header row happens to repeat on the second page -- column count is
+    invariant either way, so this works regardless of which convention
+    a given table follows.
+    """
+    if not markdown_content:
+        return None
+    for md_line in markdown_content.strip().splitlines():
+        stripped = md_line.strip()
+        if stripped.startswith("|") and not set(stripped) <= set("|-: "):
+            return stripped.strip("|").count("|") + 1
+    return None
+
+
+def _breaks_table_continuation(label: str, is_heading: bool, item_text: str) -> bool:
+    """
+    Decides whether an element sitting between two tables rules out
+    treating them as one logical table split across a page break.
+
+    Tolerated (does NOT break continuation): captions, and short
+    annotation-like text -- a "(continued)" marker, a repeated header
+    fragment that leaked out as its own text element, a table number/
+    title line. These are exactly the kind of thing that legitimately
+    sits between two fragments of the SAME table.
+
+    Breaks continuation: a real heading, or a substantial paragraph of
+    body text -- the kind of content that would only appear between two
+    genuinely SEPARATE tables (a new section starting, an explanatory
+    paragraph), not between two fragments of one table.
+    """
+    if label == "caption":
+        return False
+    if is_heading:
+        return True
+    return len(item_text.split()) > 12
+
+# Lowercase-only, deliberately -- matches this file's existing convention
+# (see BARE_LETTER_HEADING_RE / _lowercase_roman_prefix_end): lowercase
+# roman characters conventionally mark list items and pagination, while
+# genuine structural roman headings ("III. Drug Substance") are
+# uppercase and already require trailing content via BARE_ROMAN_HEADING_RE,
+# so restricting this check to lowercase avoids colliding with those.
+ROMAN_PAGE_NUMBER_ONLY_RE = re.compile(
+    r"^\s*(?:(?i:page)\s+)?[-–—]?\s*([ivxlcdm]+)\s*[-–—]?\s*$"
+)
+
+def _is_bare_roman_page_number(text: str) -> bool:
+    match = ROMAN_PAGE_NUMBER_ONLY_RE.match(text.strip())
+    if not match:
+        return False
+    return _is_valid_roman(match.group(1))
+
+
 def build_structured_elements(document, pdf_path: str):
     """
     Walk docling's structured document tree, in document order, and group
@@ -597,9 +682,16 @@ def build_structured_elements(document, pdf_path: str):
     """
     elements_by_page = {}
     table_ids = {}
+    next_table_id = 1
     figure_ids = {}
     order_counter = 0
     page_order_counters = {}
+    # Tracks the most recently emitted table for cross-page continuation
+    # detection (see _table_column_count / _breaks_table_continuation).
+    # None whenever something non-trivial has intervened since the last
+    # table, so a later table on a much-later page can't be wrongly
+    # linked to a stale one.
+    last_table_state = None
 
     # level -> heading text, representing the currently "open" hierarchy path
     current_hierarchy_context = {} 
@@ -636,7 +728,6 @@ def build_structured_elements(document, pdf_path: str):
         label = str(getattr(item, "label", item.__class__.__name__))
         item_page = prov_entries[0].page_no
         item_text = getattr(item, "text", "") or ""
-         
 
         is_heading = isinstance(item, SectionHeaderItem)
         # combined_numbering_level returns a 3-tuple (level,
@@ -648,7 +739,7 @@ def build_structured_elements(document, pdf_path: str):
             item_text, keyword_schemes
         )
         
-                # Does item_text itself carry label content beyond its own
+        # Does item_text itself carry label content beyond its own
         # numbering? A block that is JUST a number/keyword ("ARTICLE V",
         # "1.") -- title given as a SEPARATE following heading -- has no
         # remainder of its own. A block bundling numbering AND a full
@@ -674,6 +765,24 @@ def build_structured_elements(document, pdf_path: str):
                     f"text='{item_text[:60]}' -> demoted, dot-leader + "
                     f"trailing page number"
                 )
+        elif is_heading and (_is_bare_page_number(item_text) or _is_bare_roman_page_number(item_text)):
+            # Independent of has_own_numbering below, same reason as the
+            # sentence-shape check right after this: a bare page number
+            # ("45") has no trailing text for BARE_TOP_LEVEL_NUMBER_RE to
+            # match, so has_own_numbering is False and the veto further
+            # down never runs at all -- Docling's own classification
+            # would otherwise be the only word on this. Also matters for
+            # cross-page table continuation: an unvetoed page-number
+            # "heading" sitting between two fragments of the same table
+            # was being read by _breaks_table_continuation as real
+            # intervening content, wrongly splitting the table in two.
+            is_heading = False
+            label = "text"
+            log.info(
+                f"PAGE-NUMBER VETO page={item_page} "
+                f"text='{item_text[:60]}' -> demoted, bare page number, "
+                f"not a heading"
+            )
         elif is_heading and _looks_like_sentence_not_heading(item_text):
             # Independent of has_own_numbering below -- this is exactly
             # what catches a lowercase list marker like "c) the
@@ -694,7 +803,7 @@ def build_structured_elements(document, pdf_path: str):
             if table_artifact_pool and normalized_item_text and normalized_item_text in table_artifact_pool:
                 is_heading = False
                 label = "text"
-            elif has_own_numbering and not _is_strong_compound_numbering(numbering_scheme, numbering_level):
+            elif not _is_strong_compound_numbering(numbering_scheme, numbering_level):
                 # Docling sometimes classifies "bold numbering + long
                 # regular-text sentence" as a genuine SectionHeaderItem
                 # (see D2.8.2 above) -- it isn't a heading, just a
@@ -911,15 +1020,63 @@ def build_structured_elements(document, pdf_path: str):
                 else "numbering-fallback"
             )
 
+        is_table_continuation = False
+
         if label == "table":
             key = id(item)
-            if key not in table_ids:
-                table_ids[key] = len(table_ids) + 1
-            element["tableId"] = table_ids[key]
             try:
-                element["content"] = item.export_to_markdown(document)
+                table_markdown = item.export_to_markdown(document)
             except Exception:
-                element["content"] = None
+                table_markdown = None
+            column_count = _table_column_count(table_markdown)
+
+            # Docling gives a page-split table as TWO SEPARATE TableItem
+            # objects (one per page fragment), each with its own
+            # single-page prov entry -- there is no per-item signal at
+            # all that links them, which is why continuedFromPreviousPage
+            # /continuesOnNextPage below were always False and table_ids
+            # always incremented. Detected here instead, from page
+            # adjacency plus "nothing substantial intervened" (tracked
+            # across every element in the loop, not just tables --
+            # see _breaks_table_continuation below), corroborated by
+            # column count where available. Column count is checked
+            # rather than header content specifically because it holds
+            # regardless of whether a given table repeats its header row
+            # on the continuation page or not.
+            is_table_continuation = (
+                last_table_state is not None
+                and item_page == last_table_state["last_page"] + 1
+                and (
+                    column_count is None
+                    or last_table_state["column_count"] is None
+                    or column_count == last_table_state["column_count"]
+                )
+            )
+
+            if is_table_continuation:
+                table_ids[key] = last_table_state["table_id"]
+                # The previous table's last page-element was already
+                # emitted (in an earlier loop iteration) with
+                # continuesOnNextPage left at its per-item-provenance
+                # default of False -- patch it now that the continuation
+                # is known. Safe because page_element dicts are appended
+                # by reference into elements_by_page, not copied.
+                last_table_state["last_page_element"]["continuesOnNextPage"] = True
+            elif key not in table_ids:
+                # A dedicated counter, NOT len(table_ids): every
+                # continuation fragment ALSO adds an entry to table_ids
+                # (same value, reused id, but still a new dict key), so
+                # len(table_ids) counts raw fragments processed so far,
+                # not distinct logical tables assigned an id. A table
+                # spanning 3 fragments would inflate the next genuinely
+                # new table's id by 2 (e.g. table 1 -> id 4 instead of
+                # id 2) if derived from len(table_ids) instead.
+                table_ids[key] = next_table_id
+                next_table_id += 1
+
+            element["tableId"] = table_ids[key]
+            element["content"] = table_markdown
+            element["continuationOfPreviousTable"] = is_table_continuation
 
             if element["content"]:
                 for md_line in element["content"].strip().splitlines():
@@ -947,6 +1104,7 @@ def build_structured_elements(document, pdf_path: str):
                 table_artifact_pool = (table_artifact_pool + " " + _normalize_for_dedup(item_text)).strip()
 
         num_pages_spanned = len(prov_entries)
+        emitted_page_elements = []
         for idx, prov in enumerate(prov_entries):
             page_element = dict(element)
             page_element["continuedFromPreviousPage"] = idx > 0
@@ -957,6 +1115,22 @@ def build_structured_elements(document, pdf_path: str):
             page_order_counters[prov.page_no] = local_order + 1
 
             elements_by_page.setdefault(prov.page_no, []).append(page_element)
-            
+            emitted_page_elements.append(page_element)
+
+        if label == "table":
+            if is_table_continuation:
+                # idx==0 by construction (a table fragment is always a
+                # single-provenance item -- see above), so this is the
+                # one and only page_element just emitted for it.
+                emitted_page_elements[0]["continuedFromPreviousPage"] = True
+            last_table_state = {
+                "table_id": table_ids[key],
+                "last_page": prov_entries[-1].page_no,
+                "column_count": _table_column_count(element.get("content")),
+                "last_page_element": emitted_page_elements[-1],
+            }
+        elif _breaks_table_continuation(label, is_heading, item_text):
+            last_table_state = None
+
     pdf_doc.close()
     return elements_by_page

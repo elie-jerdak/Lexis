@@ -1,7 +1,8 @@
-﻿using Lexis.Core.Interfaces;
+﻿using Lexis.Core.DTOs.DocumentProcessing;
+using Lexis.Core.Interfaces;
 using Microsoft.Extensions.Logging;
 using System.Net.Http.Json;
-using Lexis.Core.DTOs.DocumentProcessing;
+using System.Text.Json;
 
 namespace Lexis.Core.Services
 {
@@ -38,19 +39,27 @@ namespace Lexis.Core.Services
                         ? "No detailed message provided."
                         : errorDetails);
 
-                throw new HttpRequestException(
-                    $"Failed to extract PDF text. Status: {response.StatusCode}");
+                throw new HttpRequestException($"Failed to extract PDF text. Status: {response.StatusCode}");
             }
 
+            // Read the RAW JSON returned by Docling
+            var rawJson = await response.Content.ReadAsStringAsync(cancellationToken);
 
-            var result = await response.Content
-                .ReadFromJsonAsync<ExtractedDocument>(
-                    cancellationToken: cancellationToken);
+            // Save the exact Docling response
+            var jsonPath = Path.ChangeExtension(filePath, ".json");
 
+            await File.WriteAllTextAsync(jsonPath, rawJson, cancellationToken);
+
+            // Deserialize the same raw response
+            var result = JsonSerializer.Deserialize<ExtractedDocument>(
+                rawJson,
+                new JsonSerializerOptions
+                {
+                    PropertyNameCaseInsensitive = true
+                });
 
             if (result is null)
                 throw new Exception("Docling returned an empty response.");
-
 
             return result;
         }

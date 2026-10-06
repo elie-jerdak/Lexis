@@ -21,8 +21,8 @@ namespace Lexis.API.Migrations
                 .HasAnnotation("ProductVersion", "10.0.0")
                 .HasAnnotation("Relational:MaxIdentifierLength", 63);
 
-            NpgsqlModelBuilderExtensions.HasPostgresEnum(modelBuilder, "document_status", new[] { "failed", "indexed", "pending", "processing" });
-            NpgsqlModelBuilderExtensions.HasPostgresEnum(modelBuilder, "document_status", "document_status", new[] { "pending", "processing", "indexed", "failed" });
+            NpgsqlModelBuilderExtensions.HasPostgresEnum(modelBuilder, "document_status", new[] { "chunked", "failed", "indexed", "pending", "processing" });
+            NpgsqlModelBuilderExtensions.HasPostgresEnum(modelBuilder, "document_status", "document_status", new[] { "pending", "processing", "indexed", "chunked", "failed" });
             NpgsqlModelBuilderExtensions.HasPostgresEnum(modelBuilder, "message_role", new[] { "assistant", "user" });
             NpgsqlModelBuilderExtensions.HasPostgresEnum(modelBuilder, "message_role", "message_role", new[] { "user", "assistant" });
             NpgsqlModelBuilderExtensions.UseIdentityByDefaultColumns(modelBuilder);
@@ -274,9 +274,15 @@ namespace Lexis.API.Migrations
                     b.Property<int>("ChunkIndex")
                         .HasColumnType("integer");
 
+                    b.Property<int>("ChunkType")
+                        .HasColumnType("integer");
+
                     b.Property<string>("Content")
                         .IsRequired()
                         .HasColumnType("text");
+
+                    b.Property<int>("ContinuationType")
+                        .HasColumnType("integer");
 
                     b.Property<DateTime>("CreatedAt")
                         .ValueGeneratedOnAdd()
@@ -286,13 +292,28 @@ namespace Lexis.API.Migrations
                     b.Property<Guid>("DocumentId")
                         .HasColumnType("uuid");
 
-                    b.Property<int?>("PageNumber")
+                    b.Property<int>("EndPage")
                         .HasColumnType("integer");
 
+                    b.Property<int?>("FigureId")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("Heading")
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)");
+
+                    b.Property<string>("HeadingPath")
+                        .HasColumnType("text");
+
                     b.Property<string>("QdrantVectorId")
-                        .IsRequired()
                         .HasMaxLength(64)
                         .HasColumnType("character varying(64)");
+
+                    b.Property<int>("StartPage")
+                        .HasColumnType("integer");
+
+                    b.Property<int?>("TableId")
+                        .HasColumnType("integer");
 
                     b.Property<int>("TokenCount")
                         .HasColumnType("integer");

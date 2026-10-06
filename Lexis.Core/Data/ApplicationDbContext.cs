@@ -131,6 +131,7 @@ public partial class ApplicationDbContext
 
             entity.Property(e => e.Id).HasDefaultValueSql("gen_random_uuid()");
             entity.Property(e => e.CreatedAt).HasDefaultValueSql("CURRENT_TIMESTAMP");
+            entity.Property(e => e.ChunkType).HasConversion<int>();
              
         });
 

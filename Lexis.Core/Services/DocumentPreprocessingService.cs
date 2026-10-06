@@ -1,6 +1,6 @@
-﻿using Lexis.Core.Interfaces;
+﻿using Lexis.Core.DTOs.DocumentProcessing;
+using Lexis.Core.Interfaces;
 using Microsoft.Extensions.Logging;
-using Lexis.Core.DTOs.DocumentProcessing;
 
 namespace Lexis.Core.Services
 {
@@ -9,48 +9,64 @@ namespace Lexis.Core.Services
         private readonly ITextCleaningService _textCleaningService; 
         private readonly ILogger<DocumentProcessingService> _logger;
         private readonly IDocumentStructureService _documentStructureService;
+        private readonly ITableContinuationService _tableContinuationService;
         public DocumentPreprocessingService(ITextCleaningService textCleaningService,
-            ILogger<DocumentProcessingService> logger, IDocumentStructureService documentStructureService)
+            ILogger<DocumentProcessingService> logger, IDocumentStructureService documentStructureService,
+            ITableContinuationService tableContinuationService)
         {
             _textCleaningService = textCleaningService; 
             _logger = logger;
             _documentStructureService = documentStructureService;
+            _tableContinuationService = tableContinuationService;
         }
 
 
-        public async Task<List<ProcessedPage>> ProcessAsync(List<ExtractedPage> pages, CancellationToken cancellationToken)
+        public async Task<ProcessedDocument> ProcessAsync(ExtractedDocument document, CancellationToken cancellationToken)
         {
             cancellationToken.ThrowIfCancellationRequested();
             
-            var repeatedHeaders = _documentStructureService.FindRepeatedHeaders(pages);
+            var repeatedHeaders = _documentStructureService.FindRepeatedHeaders(document.Pages);
 
-            var repeatedFooters = _documentStructureService.FindRepeatedFooters(pages);
+            var repeatedFooters = _documentStructureService.FindRepeatedFooters(document.Pages);
 
-            return pages
-                .Select(page =>
-                {
-                    var filteredElements = page.Elements
-                        .Where(element =>!IsNoise(element, repeatedHeaders, repeatedFooters))
-                        .ToList();
-
-
-                    return new ProcessedPage
+            var processedPages = document.Pages
+                    .Select(page =>
                     {
-                        PageNumber = page.PageNumber,
+                        var filteredElements = page.Elements
+                            .Where(element =>
+                                !IsNoise(
+                                    element,
+                                    repeatedHeaders,
+                                    repeatedFooters))
+                            .ToList();
 
-                        Text = _textCleaningService.Clean(
-                            string.Join(
-                                "\n",
-                                filteredElements
-                                    .Where(e => !string.IsNullOrWhiteSpace(e.Text))
-                                    .Select(e => e.Text))),
 
-                        Markdown = page.Markdown,
+                        return new ProcessedPage
+                        {
+                            PageNumber = page.PageNumber,
 
-                        Elements = filteredElements
-                    };
-                })
-                .ToList();
+                            Text = _textCleaningService.Clean(
+                                string.Join(
+                                    "\n",
+                                    filteredElements
+                                        .Where(e => !string.IsNullOrWhiteSpace(e.Text))
+                                        .Select(e => e.Text))),
+
+                            Markdown = page.Markdown,
+
+                            Elements = filteredElements
+                        };
+                    })
+                    .ToList();
+            var processedDocument = new ProcessedDocument
+            {
+                Pages = processedPages,
+                Metadata = document.Metadata
+            };
+
+            processedDocument = _tableContinuationService.ProcessTableContinuations(processedDocument);
+
+            return processedDocument;
         }
 
         private bool IsNoise(DocumentElement element, HashSet<string> repeatedHeaders, HashSet<string> repeatedFooters)

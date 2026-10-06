@@ -1,8 +1,9 @@
 ﻿using Lexis.API.Data;
 using Lexis.Core.Enums;
 using Lexis.Core.Interfaces;
-using Microsoft.Extensions.Logging;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
+using System.Text.Json;
 
 namespace Lexis.Core.Services
 {
@@ -12,14 +13,19 @@ namespace Lexis.Core.Services
         private readonly ILogger<DocumentProcessingService> _logger;
         private readonly IDocumentExtractionService _documentExtractionService;
         private readonly IDocumentPreprocessingService _preprocessingService;
+        private readonly IDocumentChunkingService _documentChunkingService;
+        private readonly IDocumentChunkRepository _documentChunkRepository;
 
         public DocumentProcessingService(ApplicationDbContext context, ILogger<DocumentProcessingService> logger,
-            IDocumentExtractionService documentExtractionService, IDocumentPreprocessingService preprocessingService)
+            IDocumentExtractionService documentExtractionService, IDocumentPreprocessingService preprocessingService,
+            IDocumentChunkingService documentChunkingService, IDocumentChunkRepository documentChunkRepository)
         {
             _context = context;
             _logger = logger;
             _documentExtractionService = documentExtractionService;
             _preprocessingService = preprocessingService;
+            _documentChunkingService = documentChunkingService;
+            _documentChunkRepository = documentChunkRepository;
         }
 
         public async Task ProcessPendingDocumentsAsync(CancellationToken cancellationToken)
@@ -68,12 +74,16 @@ namespace Lexis.Core.Services
 
             if (document == null)
             {
-                _logger.LogWarning("Document {DocumentId} was not found.", documentId);
+                _logger.LogWarning(
+                    "Document {DocumentId} was not found.",
+                    documentId);
+
                 return;
             }
 
             try
             {
+                // Mark document as processing
                 document.Status = DocumentStatus.Processing;
                 document.ProcessingStartedAt = DateTime.UtcNow;
                 document.ProcessingCompletedAt = null;
@@ -81,71 +91,83 @@ namespace Lexis.Core.Services
 
                 await _context.SaveChangesAsync(cancellationToken);
 
+
                 // ======================================================
-                // Pipeline
+                // 1. Extract document content
                 // ======================================================
 
-                try
-                {
-                    // 1. Extract document content
+                var extractedDocument = await _documentExtractionService.ExtractAsync(document.FilePath, cancellationToken);
 
-                    var extractedDocument = await _documentExtractionService.ExtractAsync(document.FilePath, cancellationToken);
-
-                    cancellationToken.ThrowIfCancellationRequested();
-
-                    // 2. Normalize document content
-
-                    var processedPages = await _preprocessingService.ProcessAsync(extractedDocument.Pages, cancellationToken);
+                cancellationToken.ThrowIfCancellationRequested();
 
 
-                    foreach (var page in processedPages)
-                    {
-                        _logger.LogInformation(
-                            """
-                            ===== PAGE {Page} =====
+                // ======================================================
+                // 2. Normalize document content
+                // ======================================================
 
-                            {Text}
-                            """,
-                            page.PageNumber,
-                            page.Text);
-                    }
-                    cancellationToken.ThrowIfCancellationRequested();
+                var processedDocument = await _preprocessingService.ProcessAsync(extractedDocument, cancellationToken);
 
-                    // 3. Chunk document
+                cancellationToken.ThrowIfCancellationRequested();
 
-                    cancellationToken.ThrowIfCancellationRequested();
+                // ======================================================
+                // 3. Chunk document
+                // ======================================================
 
-                    // 4. Generate embeddings
+                var chunks = _documentChunkingService.CreateChunks(documentId, processedDocument);
 
-                    cancellationToken.ThrowIfCancellationRequested();
+                cancellationToken.ThrowIfCancellationRequested();
 
-                    // 5. Store vectors in Qdrant
 
-                    cancellationToken.ThrowIfCancellationRequested();
+                // ======================================================
+                // 4. Save chunks
+                // ======================================================
 
-                    // ====================================================== 
-                }
-                catch (HttpRequestException httpEx)
-                {
-                    _logger.LogError(httpEx, "Extraction service error while processing document {DocumentId}.", documentId);
-                    throw; // Rethrow to let the outer catch update database status to Failed
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogError(ex, "Pipeline processing error while processing document {DocumentId}.", documentId);
-                    throw; // Rethrow to let the outer catch update database status to Failed
-                }
+                await _documentChunkRepository.AddRangeAsync(chunks, cancellationToken);
+
+                document.Status = DocumentStatus.Chunked;
+
+                await _context.SaveChangesAsync(cancellationToken);
+
+
+                // ======================================================
+                // 5. Generate embeddings
+                // ======================================================
+
+                cancellationToken.ThrowIfCancellationRequested();
+
+                // var embeddings = await _embeddingService.GenerateAsync(chunks, cancellationToken);
+
+
+                // ======================================================
+                // 6. Store vectors in Qdrant
+                // ======================================================
+
+                cancellationToken.ThrowIfCancellationRequested();
+
+                // await _vectorStoreService.StoreAsync(embeddings, cancellationToken);
+
+
+                // ======================================================
+                // Completed
+                // ======================================================
 
                 document.Status = DocumentStatus.Indexed;
                 document.ProcessingCompletedAt = DateTime.UtcNow;
 
                 await _context.SaveChangesAsync(cancellationToken);
 
-                _logger.LogInformation("Successfully processed document {DocumentId}.", documentId);
+                _logger.LogInformation(
+                    "Successfully processed document {DocumentId}.",
+                    documentId);
             }
-            catch (OperationCanceledException)
+            catch (OperationCanceledException ex)
             {
-                _logger.LogInformation("Processing cancelled for document {DocumentId}.", documentId);
+                // Check if the cancellation came from a specific token source
+                _logger.LogInformation(
+                    ex,
+                    "Processing cancelled for document {DocumentId}. Inner message: {Message}",
+                    documentId,
+                    ex.Message);
                 throw;
             }
             catch (Exception ex)
@@ -154,9 +176,14 @@ namespace Lexis.Core.Services
                 document.ProcessingCompletedAt = DateTime.UtcNow;
                 document.ProcessingError = ex.Message;
 
+                // Do not use cancellation token here.
+                // We want to save failure information even if cancellation happened.
                 await _context.SaveChangesAsync();
 
-                _logger.LogError(ex, "Failed processing document {DocumentId}.", documentId);
+                _logger.LogError(
+                    ex,
+                    "Failed processing document {DocumentId}.",
+                    documentId);
             }
         }
     }
