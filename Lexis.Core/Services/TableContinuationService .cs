@@ -17,7 +17,7 @@ namespace Lexis.Core.Services
             _analyzer = analyzer;
             _logger = logger;
             _helpers = helpers;
-        } 
+        }
 
         public ProcessedDocument ProcessTableContinuations(ProcessedDocument document)
         {
@@ -26,29 +26,44 @@ namespace Lexis.Core.Services
 
             var orderedTables = GetOrderedTables(document);
 
+            /*
+             * Next unused TableId, taken from the ids extraction already assigned.
+             * Computed once, before any mutation, so it can't collide with a real
+             * table and each detached fragment gets the next number in sequence.
+             */
+            int nextTableId = orderedTables
+                                .Select(t => t.Element.TableId ?? 0)
+                                .DefaultIfEmpty(0)
+                                .Max() + 1;
+
             if (orderedTables.Count < 2)
             {
                 _logger.LogDebug(
                     "Table continuation processing skipped because the document contains fewer than two tables.");
-
                 return document;
             }
 
             /*
-             * Phase 1: decide every pair BEFORE mutating anything.
+             * Phase 1: decide every pair, and capture whether extraction
+             * ALREADY linked it, BEFORE anything is mutated.
              *
-             * A table in the middle of a chain plays two roles across the loop:
-             * it is `current` for the pair before it, and `previous` for the
-             * pair after it. If we strip its repeated header/caption as soon as
-             * it's confirmed as a continuation (its `current` role), the very
-             * same element is then evaluated again, corrupted, in its `previous`
-             * role for the next pair -- e.g. its header row is gone, so header-
-             * subset/overlap evidence for the NEXT pair silently disappears.
-             * Deciding every pair first, against untouched original content,
-             * makes every decision independent of processing order and of any
-             * other pair's mutation.
+             * This must be captured here, not recomputed later in Phase 2 --
+             * a table in the middle of a confirmed chain plays `current` in
+             * one pair and `previous` in the next; by the time Phase 2
+             * reaches a later pair, an earlier Continue may have already
+             * overwritten that element's TableId while propagating a merge
+             * forward. Recomputing the comparison live at that point means
+             * comparing against a value this service itself just changed,
+             * not what extraction originally reported -- the same same-
+             * object mutation-order hazard Phase 1 already exists to avoid
+             * for the analyzer's own evidence collection, just resurfacing
+             * one layer up.
              */
-            var decisions = new List<(TableReference Previous, TableReference Current, TableContinuationDecision Decision)>();
+            var decisions = new List<(
+                TableReference Previous,
+                TableReference Current,
+                TableContinuationDecision Decision,
+                bool DoclingAlreadyLinksThem)>();
 
             for (int i = 0; i < orderedTables.Count - 1; i++)
             {
@@ -57,61 +72,28 @@ namespace Lexis.Core.Services
 
                 var intervening = GetInterveningElements(document, previous, current);
 
-                _logger.LogInformation(
-                    "INTERVENING Page {P} -> {C}:\n{Elements}",
+                var decision = _analyzer.Evaluate(
+                    previous.Element,
                     previous.PageNumber,
+                    current.Element,
                     current.PageNumber,
-                    string.Join(
-                        "\n",
-                        intervening.Select(e =>
-                            $"  Order={e.Order}, Type={e.ElementType}, " +
-                            $"Text='{e.Text}', Markdown='{e.Markdown}', " +
-                            $"HeadingPath='{string.Join(" > ", e.HeadingPath ?? new List<string>())}', " +
-                            $"HeadingLevel={e.HeadingLevel}")));
-
-                var previousGrid = _helpers.GetTableGrid(previous.Element);
-                var currentGrid = _helpers.GetTableGrid(current.Element);
-
-                _logger.LogInformation(
-                    "TABLE DEBUG Page {P} TableId {T}:\nHeader: {Header}\nRows:\n{Rows}",
-                    previous.PageNumber,
-                    previous.Element.TableId,
-                    previousGrid?.Header == null
-                        ? "<none>"
-                        : string.Join(" | ", previousGrid.Header),
-                    previousGrid == null
-                        ? "<null>"
-                        : string.Join(
-                            "\n",
-                            previousGrid.Rows.Select(
-                                (row, index) =>
-                                    $"  Row {index}: {string.Join(" | ", row)}")));
-
-                _logger.LogInformation(
-                    "TABLE DEBUG Page {P} TableId {T}:\nHeader: {Header}\nRows:\n{Rows}",
-                    current.PageNumber,
-                    current.Element.TableId,
-                    currentGrid?.Header == null
-                        ? "<none>"
-                        : string.Join(" | ", currentGrid.Header),
-                    currentGrid == null
-                        ? "<null>"
-                        : string.Join(
-                            "\n",
-                            currentGrid.Rows.Select(
-                                (row, index) =>
-                                    $"  Row {index}: {string.Join(" | ", row)}")));
-
-                var decision = _analyzer.Evaluate(previous.Element, previous.PageNumber, 
-                    current.Element, current.PageNumber, intervening);
+                    intervening);
 
                 LogDecision(previous, current, decision);
 
-                decisions.Add((previous, current, decision));
+                bool doclingAlreadyLinksThem =
+                    current.Element.TableId == previous.Element.TableId &&
+                    current.Element.ContinuedFromPreviousPage &&
+                    previous.Element.ContinuesOnNextPage;
+
+                decisions.Add((previous, current, decision, doclingAlreadyLinksThem));
             }
 
-            // TableContinuationService.cs -- phase 2
-            foreach (var (previous, current, decision) in decisions)
+            /*
+             * Phase 2: apply mutations for confirmed continuations, and break
+             * extraction-provided links the analyzer actively contradicted.
+             */
+            foreach (var (previous, current, decision, doclingAlreadyLinksThem) in decisions)
             {
                 if (decision.Verdict == TableContinuationVerdict.Continue)
                 {
@@ -125,57 +107,29 @@ namespace Lexis.Core.Services
                     continue;
                 }
 
-                /*
-                 * The analyzer did not confirm continuation. If extraction's own
-                 * raw flags already mark this pair as continuous (matching
-                 * TableId with both continuation flags set -- typically from
-                 * Docling's own page-adjacency heuristic, upstream of this
-                 * service), and the analyzer found at least one real piece of
-                 * evidence AGAINST continuation, that detected contradiction has
-                 * to actually take effect -- otherwise this service's evidence-
-                 * weighing is purely advisory, and the chunker merges the two
-                 * fragments anyway using extraction's raw, unreviewed flags
-                 * regardless of what was just concluded here.
-                 *
-                 * A verdict reached with NO veto at all (evidence was simply
-                 * sparse, not contradictory) is left alone -- there's nothing
-                 * detected to act on, so extraction's original guess stands.
-                 */
                 bool hasAnyVeto = decision.Evidence.Any(e => e.Kind == EvidenceKind.Veto);
-                bool doclingAlreadyLinksThem =
-                    current.Element.TableId == previous.Element.TableId &&
-                    current.Element.ContinuedFromPreviousPage &&
-                    previous.Element.ContinuesOnNextPage;
 
                 if (hasAnyVeto && doclingAlreadyLinksThem)
                 {
+                    var mergedTableId = previous.Element.TableId;
+
                     current.Element.ContinuedFromPreviousPage = false;
                     previous.Element.ContinuesOnNextPage = false;
                     current.Element.ContinuationOfPreviousTable = false;
-
-                    /*
-                     * Give the current fragment its own identity instead of
-                     * continuing to share previous's TableId -- otherwise the
-                     * chunker's pending-table lookup (keyed by TableId) would
-                     * still treat them as the same logical table even with the
-                     * continuation flags cleared. Offset far above any realistic
-                     * extraction-assigned id so it can never collide with a real
-                     * table elsewhere in the document.
-                     */
-                    current.Element.TableId = 1_000_000 + current.Element.Order;
+                    current.Element.TableId = nextTableId++;
 
                     _logger.LogInformation(
                         "Breaking extraction-provided continuation link between Page {PreviousPage} " +
                         "TableId {PreviousTableId} and Page {CurrentPage} (new TableId {NewTableId}): " +
                         "analyzer verdict was {Verdict} with contradicting evidence present.",
-                        previous.PageNumber, previous.Element.TableId,
+                        previous.PageNumber, mergedTableId,
                         current.PageNumber, current.Element.TableId, decision.Verdict);
                 }
             }
 
             return document;
         }
-
+        
         /// <summary>
         /// Removes the current table fragment's own repeated caption/title text
         /// (e.g. "Table 1 (continued).") from its Content/Markdown. Prefers a
@@ -357,6 +311,7 @@ namespace Lexis.Core.Services
             new System.Text.RegularExpressions.Regex(@"^\s*\|.*\|\s*$", System.Text.RegularExpressions.RegexOptions.Compiled);
 
         private bool MarkdownRowIsTableRow(string trimmedLine) => TableRowRegex.IsMatch(trimmedLine);
+
         private List<TableReference> GetOrderedTables(ProcessedDocument document)
         {
             return document.Pages
