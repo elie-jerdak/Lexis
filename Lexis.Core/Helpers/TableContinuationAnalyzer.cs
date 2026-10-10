@@ -1,6 +1,8 @@
 ﻿using Lexis.Core.DTOs.DocumentProcessing;
+using Lexis.Core.DTOs.TableContinuation;
+using Lexis.Core.Enums;
 
-namespace Lexis.Core.DTOs.TableContinuation
+namespace Lexis.Core.Helpers
 {
     public sealed class TableContinuationAnalyzer
     {

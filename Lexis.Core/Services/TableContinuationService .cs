@@ -1,5 +1,7 @@
 ﻿using Lexis.Core.DTOs.DocumentProcessing;
 using Lexis.Core.DTOs.TableContinuation;
+using Lexis.Core.Enums;
+using Lexis.Core.Helpers;
 using Lexis.Core.Interfaces;
 using Microsoft.Extensions.Logging;
 

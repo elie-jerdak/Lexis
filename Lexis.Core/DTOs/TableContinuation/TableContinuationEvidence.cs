@@ -1,4 +1,6 @@
-﻿namespace Lexis.Core.DTOs.TableContinuation
+﻿using Lexis.Core.Enums;
+
+namespace Lexis.Core.DTOs.TableContinuation
 {
     public sealed class TableContinuationEvidence
     {

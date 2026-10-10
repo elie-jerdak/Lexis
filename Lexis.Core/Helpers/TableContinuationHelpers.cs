@@ -1,9 +1,10 @@
 ﻿using Lexis.Core.DTOs.DocumentProcessing;
+using Lexis.Core.DTOs.TableContinuation;
 using System.Globalization;
 using System.Text;
 using System.Text.RegularExpressions;
 
-namespace Lexis.Core.DTOs.TableContinuation
+namespace Lexis.Core.Helpers
 {
     public sealed class TableContinuationHelpers
     {
@@ -656,17 +657,6 @@ namespace Lexis.Core.DTOs.TableContinuation
             return string.Empty;
         }
 
-        private string ExtractLeadingInteger(string value)
-        {
-            var match = Regex.Match(
-                value,
-                @"\d+");
-
-            return match.Success
-                ? match.Value
-                : string.Empty;
-        }
-
         private HashSet<string> TokenizeHeader(IReadOnlyList<string> header)
         {
             var tokens = new HashSet<string>(
@@ -1217,21 +1207,5 @@ namespace Lexis.Core.DTOs.TableContinuation
             return false;
         }
 
-    }
-}
-
-public sealed class TableGrid
-{
-    public IReadOnlyList<IReadOnlyList<string>> Rows { get; }
-    public int ColumnCount { get; }
-    public IReadOnlyList<string>? Header { get; }
-    public string? CaptionText { get; }
-
-    public TableGrid(IReadOnlyList<List<string>> rows, int columnCount, IReadOnlyList<string>? header, string? captionText = null)
-    {
-        Rows = rows.Select(x => (IReadOnlyList<string>)x).ToList();
-        ColumnCount = columnCount;
-        Header = header;
-        CaptionText = captionText;
     }
 }

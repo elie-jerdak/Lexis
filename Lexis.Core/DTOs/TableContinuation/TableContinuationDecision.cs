@@ -1,12 +1,7 @@
-﻿namespace Lexis.Core.DTOs.TableContinuation
-{
-    public enum TableContinuationVerdict
-    {
-        Continue,
-        Reject,
-        Unknown
-    }
+﻿using Lexis.Core.Enums;
 
+namespace Lexis.Core.DTOs.TableContinuation
+{
     public sealed class TableContinuationDecision
     {
         public TableContinuationVerdict Verdict { get; }
@@ -23,14 +18,9 @@
             Evidence = evidence;
         }
 
-        public static TableContinuationDecision Continue(
-            string reason,
-            IEnumerable<TableContinuationEvidence> evidence)
+        public static TableContinuationDecision Continue(string reason, IEnumerable<TableContinuationEvidence> evidence)
         {
-            return new TableContinuationDecision(
-                TableContinuationVerdict.Continue,
-                reason,
-                evidence.ToList());
+            return new TableContinuationDecision(TableContinuationVerdict.Continue, reason, evidence.ToList());
         }
 
         public static TableContinuationDecision Reject(string reason, IEnumerable<TableContinuationEvidence> evidence)

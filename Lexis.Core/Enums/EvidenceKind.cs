@@ -1,4 +1,4 @@
-﻿namespace Lexis.Core.DTOs.TableContinuation
+﻿namespace Lexis.Core.Enums
 {
     public enum EvidenceKind
     {

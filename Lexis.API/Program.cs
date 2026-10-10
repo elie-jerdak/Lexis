@@ -1,6 +1,5 @@
 using Lexis.API.Data;
 using Lexis.Core.BackgroundServices;
-using Lexis.Core.DTOs.TableContinuation;
 using Lexis.Core.Enums;
 using Lexis.Core.Helpers;
 using Lexis.Core.Interfaces;
