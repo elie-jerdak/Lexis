@@ -15,10 +15,13 @@ namespace Lexis.Core.Services
         private readonly IDocumentPreprocessingService _preprocessingService;
         private readonly IDocumentChunkingService _documentChunkingService;
         private readonly IDocumentChunkRepository _documentChunkRepository;
+        private readonly IEmbeddingService _embeddingService;
+        private readonly IVectorStoreService _vectorStoreService;
 
         public DocumentProcessingService(ApplicationDbContext context, ILogger<DocumentProcessingService> logger,
             IDocumentExtractionService documentExtractionService, IDocumentPreprocessingService preprocessingService,
-            IDocumentChunkingService documentChunkingService, IDocumentChunkRepository documentChunkRepository)
+            IDocumentChunkingService documentChunkingService, IDocumentChunkRepository documentChunkRepository,
+            IEmbeddingService embeddingService, IVectorStoreService vectorStoreService)
         {
             _context = context;
             _logger = logger;
@@ -26,6 +29,8 @@ namespace Lexis.Core.Services
             _preprocessingService = preprocessingService;
             _documentChunkingService = documentChunkingService;
             _documentChunkRepository = documentChunkRepository;
+            _embeddingService = embeddingService;
+            _vectorStoreService = vectorStoreService;
         }
 
         public async Task ProcessPendingDocumentsAsync(CancellationToken cancellationToken)
@@ -128,29 +133,55 @@ namespace Lexis.Core.Services
 
                 await _context.SaveChangesAsync(cancellationToken);
 
-
                 // ======================================================
                 // 5. Generate embeddings
                 // ======================================================
 
-                cancellationToken.ThrowIfCancellationRequested();
-
-                // var embeddings = await _embeddingService.GenerateAsync(chunks, cancellationToken);
-
-
-                // ======================================================
-                // 6. Store vectors in Qdrant
-                // ======================================================
+                // The chunks must already exist in PostgreSQL.
+                if (chunks.Count == 0)
+                {
+                    throw new InvalidOperationException(
+                        $"Document {documentId} produced no chunks to index.");
+                }
 
                 cancellationToken.ThrowIfCancellationRequested();
 
-                // await _vectorStoreService.StoreAsync(embeddings, cancellationToken);
+                // 1. Generate one embedding per chunk.
+                var texts = chunks
+                    .Select(chunk => chunk.Content)
+                    .ToArray();
 
+                var embeddings = await _embeddingService.GenerateAsync(texts, cancellationToken);
+
+                if (embeddings.Count != chunks.Count)
+                {
+                    throw new InvalidOperationException(
+                        "The embedding service returned an unexpected number of vectors.");
+                }
+
+                // 2. Ensure the collection exists with the configured vector size.
+                await _vectorStoreService.EnsureCollectionExistsAsync(cancellationToken);
+
+                // ======================================================================
+                // 6. Store embeddings in Qdrant and update chunk records with Qdrant IDs
+                // ======================================================================
+
+                // 1. Store the embeddings in Qdrant.
+                await _vectorStoreService.StoreAsync(chunks, embeddings, cancellationToken);
+
+                // 2. Persist the Qdrant IDs only after the upsert succeeds.
+                foreach (var chunk in chunks)
+                {
+                    chunk.QdrantVectorId = chunk.Id.ToString("D");
+                }
+
+                await _context.SaveChangesAsync(cancellationToken);
 
                 // ======================================================
-                // Completed
+                // 7. Completed
                 // ======================================================
 
+                // Mark the document Indexed only after both stores succeed.
                 document.Status = DocumentStatus.Indexed;
                 document.ProcessingCompletedAt = DateTime.UtcNow;
 

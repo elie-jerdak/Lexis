@@ -88,6 +88,16 @@ builder.Services.Configure<DataProtectionTokenProviderOptions>(options =>
     options.TokenLifespan = TimeSpan.FromHours(24);
 });
 
+builder.Services.Configure<OllamaEmbeddingOptions>(
+    builder.Configuration.GetSection(OllamaEmbeddingOptions.SectionName));
+
+builder.Services.AddHttpClient<IEmbeddingService, OllamaEmbeddingService>();
+
+builder.Services.Configure<QdrantOptions>(
+    builder.Configuration.GetSection(QdrantOptions.SectionName));
+
+builder.Services.AddHttpClient<IVectorStoreService, QdrantVectorStoreService>();
+
 builder.Services.AddAuthorization();
 
 builder.Services.AddHostedService<DocumentProcessingWorker>();
@@ -116,6 +126,7 @@ builder.Services.AddScoped<IDocumentChunkRepository, DocumentChunkRepository>();
 builder.Services.AddScoped<ITableContinuationService, TableContinuationService>();
 builder.Services.AddScoped<TableContinuationHelpers>();
 builder.Services.AddScoped<TableContinuationAnalyzer>();
+builder.Services.AddScoped<IDocumentSearchService, DocumentSearchService>();
 
 var app = builder.Build();
 

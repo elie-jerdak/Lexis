@@ -3,7 +3,6 @@ using Lexis.Core.Enums;
 using Lexis.Core.Interfaces;
 using Lexis.Core.Models;
 using Microsoft.Extensions.Logging;
-using System.Text;
 
 namespace Lexis.Core.Services
 {
@@ -36,6 +35,25 @@ namespace Lexis.Core.Services
                     if (_ignoredTypes.Contains(element.ElementType))
                         continue;
 
+                    var elementContent =
+                        !string.IsNullOrWhiteSpace(element.Markdown) ? element.Markdown :
+                        !string.IsNullOrWhiteSpace(element.Text) ? element.Text :
+                        !string.IsNullOrWhiteSpace(element.Content) ? element.Content :
+                        !string.IsNullOrWhiteSpace(element.Caption) ? element.Caption :
+                        string.Empty;
+
+                    if (string.IsNullOrWhiteSpace(elementContent))
+                    {
+                        _logger.LogDebug(
+                            "Skipping element with empty content. " +
+                            "ElementType={ElementType}, Page={PageNumber}, Order={Order}",
+                            element.ElementType,
+                            page.PageNumber,
+                            element.Order);
+
+                        continue;
+                    }
+
                     var chunkType = MapChunkType(element.ElementType);
 
                     if (chunkType == ChunkType.Heading)
@@ -59,17 +77,7 @@ namespace Lexis.Core.Services
                         case ChunkType.Text:
                             FlushList(chunks, documentId, state);
 
-                            var content =
-                                element.Markdown ??
-                                element.Text ??
-                                element.Content ??
-                                element.Caption ??
-                                string.Empty;
-
-                            if (string.IsNullOrWhiteSpace(content))
-                                break;
-
-                            var incomingTokens = _tokenCounter.Count(content);
+                            var incomingTokens = _tokenCounter.Count(elementContent);
 
                             /*
                              * Only start a new chunk at a paragraph boundary.
@@ -78,15 +86,10 @@ namespace Lexis.Core.Services
                              * it must remain with that paragraph even if the token limit
                              * is exceeded.
                              */
-                            if (!element.ContinuedFromPreviousPage &&
-                                state.TextBuffer.Length > 0 &&
+                            if (!element.ContinuedFromPreviousPage && state.TextBuffer.Length > 0 &&
                                 state.TextBufferTokens + incomingTokens > MaxChunkTokens)
                             {
-                                FlushText(
-                                    chunks,
-                                    documentId,
-                                    state,
-                                    ContinuationType.ArtificialTokenSplit);
+                                FlushText(chunks, documentId, state, ContinuationType.ArtificialTokenSplit);
                             }
 
                             AppendText(state, element, page.PageNumber);
@@ -523,6 +526,7 @@ namespace Lexis.Core.Services
                 ["code"] = ChunkType.Code,
                 ["formula"] = ChunkType.Formula,
                 ["reference"] = ChunkType.Reference,
+                ["document_index"] = ChunkType.DocumentIndex
             };
 
         private static readonly HashSet<string> DefaultIgnoredTypes =

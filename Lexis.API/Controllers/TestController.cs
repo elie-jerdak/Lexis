@@ -11,10 +11,12 @@ namespace Lexis.API.Controllers
     public class TestController : BaseApiController
     {
         private readonly IEmailService _emailService;
+        private readonly IEmbeddingService _embeddingService;
 
-        public TestController(IEmailService emailService)
+        public TestController(IEmailService emailService, IEmbeddingService embeddingService)
         {
             _emailService = emailService;
+            _embeddingService = embeddingService;
         }
 
         [HttpGet("public")]
@@ -90,5 +92,22 @@ namespace Lexis.API.Controllers
             });
         }
 
+        [HttpGet("test-embedding")]
+        public async Task TestEmbeddingService()
+        {
+            var vectors = await _embeddingService.GenerateAsync(
+                new[]
+                {
+            "A contract may be terminated after a material breach.",
+            "PostgreSQL is a relational database."
+                });
+
+            Console.WriteLine($"Vectors returned: {vectors.Count}");
+
+            if (vectors.Count > 0)
+            {
+                Console.WriteLine($"Dimensions: {vectors[0].Length}");
+            }
+        }
     }
 }

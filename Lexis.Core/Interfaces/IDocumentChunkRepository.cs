@@ -12,5 +12,7 @@ namespace Lexis.Core.Interfaces
         Task<List<DocumentChunk>> GetByIdsAsync(IEnumerable<Guid> chunkIds, CancellationToken cancellationToken);
 
         Task DeleteByDocumentIdAsync(Guid documentId, CancellationToken cancellationToken);
+        
+        Task<List<DocumentChunk>> SearchLexicallyAsync(string query, int limit, Guid? documentId, CancellationToken cancellationToken);
     }
 }

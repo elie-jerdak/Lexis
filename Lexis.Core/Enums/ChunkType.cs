@@ -10,6 +10,7 @@
         ImageCaption = 5,
         Formula = 6,
         Reference = 7,
-        Unknown = 8
+        Unknown = 8,
+        DocumentIndex = 9
     }
 }
