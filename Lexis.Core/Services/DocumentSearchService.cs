@@ -68,7 +68,7 @@ namespace Lexis.Core.Services
                 Math.Max(limit * 5, 25));
 
             // 3. Run dense and lexical retrieval.
-            var vectorResults = await _vectorStoreService.SearchAsync(embeddings[0], searchLimit, cancellationToken);
+            var vectorResults = await _vectorStoreService.SearchAsync(embeddings[0], searchLimit, documentId, cancellationToken);
 
             var lexicalResults = await _chunkRepository.SearchLexicallyAsync(query, searchLimit, documentId, cancellationToken);
 

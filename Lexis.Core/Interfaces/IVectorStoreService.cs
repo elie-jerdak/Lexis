@@ -11,7 +11,7 @@ namespace Lexis.Core.Interfaces
             CancellationToken cancellationToken = default);
         Task StoreAsync(IReadOnlyList<Models.DocumentChunk> chunks, IReadOnlyList<float[]> embeddings,
             CancellationToken cancellationToken = default);
-        Task<IReadOnlyList<VectorSearchResult>> SearchAsync(IReadOnlyList<float> embedding, int limit,
+        Task<IReadOnlyList<VectorSearchResult>> SearchAsync(IReadOnlyList<float> embedding, int limit, Guid? documentId = null,
             CancellationToken cancellationToken = default);
     }
 }

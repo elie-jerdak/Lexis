@@ -167,7 +167,7 @@ namespace Lexis.Core.Services
         }
 
         public async Task<IReadOnlyList<VectorSearchResult>> SearchAsync(IReadOnlyList<float> embedding, int limit,
-            CancellationToken cancellationToken = default)
+            Guid? documentId = null, CancellationToken cancellationToken = default)
         {
             ArgumentNullException.ThrowIfNull(embedding);
 
@@ -192,6 +192,22 @@ namespace Lexis.Core.Services
             {
                 query = embedding,
                 limit,
+                filter = documentId.HasValue
+                    ? new
+                    {
+                        must = new[]
+                        {
+                            new
+                            {
+                                key = "document_id",
+                                match = new
+                                {
+                                    value = documentId.Value.ToString()
+                                }
+                            }
+                        }
+                    }
+                    : null,
                 with_payload = false,
                 with_vector = false
             };
