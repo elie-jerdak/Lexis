@@ -1,10 +1,12 @@
 ﻿using Lexis.API.Common;
 using Lexis.Core.DTOs.Document;
 using Lexis.Core.Interfaces;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 
 namespace Lexis.API.Controllers
 {
+    //[Authorize]
     [Route("api/[controller]")]
     [ApiController]
     public class SearchController : BaseApiController
@@ -15,6 +17,7 @@ namespace Lexis.API.Controllers
         {
             _documentSearchService = documentSearchService;
         }
+
 
         [HttpPost]
         public async Task<IActionResult> Search([FromBody] SearchRequest request, CancellationToken cancellationToken)
@@ -35,16 +38,16 @@ namespace Lexis.API.Controllers
                 });
             }
 
-            if (request.DocumentId == Guid.Empty)
+            if (!request.DocumentId.HasValue || request.DocumentId.Value == Guid.Empty)
             {
                 return BadRequest(new
                 {
-                    error = "DocumentId must be a valid GUID when supplied."
+                    error = "DocumentId must be a valid GUID."
                 });
             }
 
-            var results = await _documentSearchService.SearchAsync(request.Query, request.Limit, request.DocumentId,
-                cancellationToken);
+            var results = await _documentSearchService.SearchAsync(request.Query, new[] { request.DocumentId.Value }, 
+                request.Limit, cancellationToken);
 
             return Ok(new
             {
@@ -68,5 +71,6 @@ namespace Lexis.API.Controllers
                 })
             });
         }
+
     }
 }

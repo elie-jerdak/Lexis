@@ -1,4 +1,5 @@
 ﻿using Lexis.API.Data;
+using Lexis.Core.Helpers;
 using Lexis.Core.Interfaces;
 using Lexis.Core.Models;
 using Microsoft.EntityFrameworkCore;
@@ -60,86 +61,87 @@ namespace Lexis.Core.Services
         private static readonly HashSet<string> LexicalStopWords = new(StringComparer.OrdinalIgnoreCase)
         {
             "what", "does", "do", "is", "are", "the", "a", "an", "of", "for", "to", "in", "on",
-            "about", "me", "please", "tell", "explain", "define", "mean"
+            "about", "me", "please", "tell", "explain", "define", "mean",
+            "stand", "meaning", "definition"
         };
 
-        public async Task<List<DocumentChunk>> SearchLexicallyAsync(string query, int limit, Guid? documentId,
-            CancellationToken cancellationToken)
+        public async Task<List<DocumentChunk>> SearchLexicallyAsync(string query, int limit, 
+            IReadOnlyCollection<Guid> documentIds, CancellationToken cancellationToken)
         {
             if (string.IsNullOrWhiteSpace(query) || limit <= 0)
                 return new List<DocumentChunk>();
 
+            if (documentIds is null || documentIds.Count == 0)
+                return new List<DocumentChunk>();
+
             var allTerms = Regex.Matches(query, @"[A-Za-z0-9]+")
-                .Select(match => match.Value.ToLowerInvariant())
+                .Select(m => m.Value.ToLowerInvariant())
                 .Distinct()
                 .ToList();
 
-            var terms = allTerms
-                .Where(term => !LexicalStopWords.Contains(term))
-                .ToList();
-
-            // If the query contains only stop words, fall back to its original terms.
+            var terms = allTerms.Where(t => !LexicalStopWords.Contains(t)).ToList();
             if (terms.Count == 0)
                 terms = allTerms;
-
             if (terms.Count == 0)
                 return new List<DocumentChunk>();
 
-            // Tokens contain only letters and digits, so they cannot inject tsquery syntax.
-            var tsQuery = string.Join(" | ", terms);
+            var orTsQuery = string.Join(" | ", terms);
 
-            // Populated only when the query explicitly asks for a definition.
-            var definitionTerm = ExtractDefinitionTerm(query);
+            var definitionTerm = DefinitionQueryAnalyzer.ExtractTerm(query);
+            if (definitionTerm is null)
+                return await RunLexicalQueryAsync(orTsQuery, null, limit, documentIds, cancellationToken);
+
+            var pgTerm = DefinitionQueryAnalyzer.ToPostgresPattern(definitionTerm);
+            var termTokens = DefinitionQueryAnalyzer.Tokenize(definitionTerm);
+
+            if (termTokens.Count > 0)
+            {
+                var strict = await RunLexicalQueryAsync(
+                    string.Join(" & ", termTokens), pgTerm, limit, documentIds, cancellationToken);
+
+                if (strict.Count > 0)
+                    return strict;
+            }
+
+            return await RunLexicalQueryAsync(orTsQuery, pgTerm, limit, documentIds, cancellationToken);
+        }
+
+        private async Task<List<DocumentChunk>> RunLexicalQueryAsync(string tsQuery, string? pgTerm, int limit,
+            IReadOnlyCollection<Guid> documentIds, CancellationToken cancellationToken)
+        {
+            var documentIdArray = documentIds.ToArray();
 
             return await _context.DocumentChunks
                 .FromSqlInterpolated($"""
                     SELECT d.*
                     FROM "DocumentChunks" AS d
                     CROSS JOIN LATERAL (
-                        SELECT to_tsvector(
-                            'simple',
-                            concat_ws(
-                                ' ',
-                                d."Content",
-                                d."Heading",
-                                d."HeadingPath"
-                            )
-                        ) AS search_vector
-                    ) AS v
-                    CROSS JOIN LATERAL (
                         SELECT to_tsquery('simple', {tsQuery}) AS search_query
                     ) AS q
-                    WHERE ({documentId} IS NULL OR d."DocumentId" = {documentId})
-                      AND v.search_vector @@ q.search_query
+                    WHERE d."DocumentId" = ANY({documentIdArray})
+                      AND d."SearchVector" @@ q.search_query
                     ORDER BY
                         CASE
-                            -- Strongest signal:
-                            -- the requested term is on its own line,
-                            -- followed by the definition on the next line.
-                            WHEN {definitionTerm}::text IS NOT NULL
+                            WHEN {pgTerm}::text IS NOT NULL
                              AND d."Content" ~* (
                                 '(^|[\r\n])[[:blank:]]*'
-                                || {definitionTerm}::text
+                                || {pgTerm}::text
                                 || '[[:blank:]]*[\r\n]+[[:blank:]]*[[:alpha:]]'
                              )
                             THEN 3
 
-                            -- The requested term is explicitly separated
-                            -- from its definition by punctuation.
-                            WHEN {definitionTerm}::text IS NOT NULL
+                            WHEN {pgTerm}::text IS NOT NULL
                              AND d."Content" ~* (
                                 '(^|[^[:alnum:]])'
-                                || {definitionTerm}::text
-                                || '[[:blank:]]*([:：—–-]|=)[[:blank:]]*'
+                                || {pgTerm}::text
+                                || '[[:blank:]]*(:|：|=|—|–|[[:blank:]]-[[:blank:]])[[:blank:]]*[^[:space:]]'
                              )
                             THEN 2
 
-                            -- The term is explicitly connected to a definition
-                            -- in ordinary prose.
-                            WHEN {definitionTerm}::text IS NOT NULL
+                            WHEN {pgTerm}::text IS NOT NULL
                              AND d."Content" ~* (
                                 '(^|[^[:alnum:]])'
-                                || {definitionTerm}::text
+                                || {pgTerm}::text
                                 || '([[:space:]]+stands[[:space:]]+for[[:space:]]+'
                                 || '|[[:space:]]+is[[:space:]]+(an?|the)[[:space:]]+'
                                 || '|[[:space:]]+refers[[:space:]]+to[[:space:]]+'
@@ -149,44 +151,12 @@ namespace Lexis.Core.Services
 
                             ELSE 0
                         END DESC,
-                        ts_rank_cd(v.search_vector, q.search_query) DESC,
+                        ts_rank_cd(d."SearchVector", q.search_query, 1) DESC,
                         d."ChunkIndex" ASC
                     LIMIT {limit}
                     """)
                 .AsNoTracking()
                 .ToListAsync(cancellationToken);
-        }
-        private static string? ExtractDefinitionTerm(string query)
-        {
-            var patterns = new[]
-            {
-                // "What does OWM stand for?"
-                @"\bwhat\s+does\s+([A-Za-z0-9]{2,})\s+stand\s+for\b",
-
-                // "What does OWM mean?"
-                @"\bwhat\s+does\s+([A-Za-z0-9]{2,})\s+mean\b",
-
-                // "What is the meaning of OWM?"
-                // "Meaning of OWM", "definition of OWM"
-                // "Full form of OWM", "expand OWM"
-                @"\b(?:what\s+is\s+the\s+meaning\s+of|meaning\s+of|definition\s+of|full\s+form\s+of|expand)\s+([A-Za-z0-9]{2,})\b",
-
-                // "Define OWM"
-                @"\bdefine\s+([A-Za-z0-9]{2,})\b"
-            };
-
-            foreach (var pattern in patterns)
-            {
-                var match = Regex.Match(
-                    query,
-                    pattern,
-                    RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
-
-                if (match.Success)
-                    return match.Groups[1].Value;
-            }
-
-            return null;
         }
     }
 }

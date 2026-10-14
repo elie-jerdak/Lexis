@@ -4,7 +4,8 @@ namespace Lexis.Core.Interfaces
 {
     public interface IDocumentSearchService
     {
-        Task<IReadOnlyList<DocumentSearchResult>> SearchAsync(string query, int limit = 5, Guid? documentId = null,
-            CancellationToken cancellationToken = default);
+        Task<IReadOnlyList<DocumentSearchResult>> SearchAsync(string query, IReadOnlyCollection<Guid> documentIds, 
+            int limit = 5, CancellationToken cancellationToken = default);
+
     }
 }

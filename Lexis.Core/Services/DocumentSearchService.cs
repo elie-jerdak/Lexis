@@ -3,9 +3,6 @@ using Lexis.Core.Helpers;
 using Lexis.Core.Interfaces;
 using Lexis.Core.Models;
 using Microsoft.Extensions.Logging;
-using System;
-using System.Collections.Generic;
-using System.Text;
 
 namespace Lexis.Core.Services
 {
@@ -25,8 +22,8 @@ namespace Lexis.Core.Services
             _logger = logger;
         }
 
-        public async Task<IReadOnlyList<DocumentSearchResult>> SearchAsync(string query, int limit = 5, Guid? documentId = null,
-            CancellationToken cancellationToken = default)
+        public async Task<IReadOnlyList<DocumentSearchResult>> SearchAsync(string query, IReadOnlyCollection<Guid> documentIds, 
+            int limit = 5, CancellationToken cancellationToken = default)
         {
             if (string.IsNullOrWhiteSpace(query))
             {
@@ -42,13 +39,15 @@ namespace Lexis.Core.Services
                     "The result limit must be between 1 and 100.");
             }
 
-            // 1. Generate the query embedding for dense retrieval.
-            var embeddings = await _embeddingService.GenerateAsync(
-                new[] { query },
-                cancellationToken);
+            if (documentIds is null || documentIds.Count == 0)
+            {
+                return Array.Empty<DocumentSearchResult>();
+            }
 
-            if (embeddings.Count != 1 || embeddings[0] is null ||
-                embeddings[0].Length == 0)
+            // 1. Generate the query embedding for dense retrieval.
+            var embeddings = await _embeddingService.GenerateAsync(new[] { query }, cancellationToken);
+
+            if (embeddings.Count != 1 || embeddings[0] is null || embeddings[0].Length == 0)
             {
                 throw new InvalidOperationException(
                     "The embedding service did not return one valid query embedding.");
@@ -56,21 +55,19 @@ namespace Lexis.Core.Services
 
             _logger.LogInformation(
                 "[RetrievalTrace] Query={Query}; RequestedLimit={Limit}; " +
-                "DocumentId={DocumentId}; EmbeddingDimensions={Dimensions}",
+                "DocumentIds={DocumentIds}; EmbeddingDimensions={Dimensions}",
                 query,
                 limit,
-                documentId,
+                documentIds,
                 embeddings[0].Length);
 
             // 2. Retrieve a larger candidate pool for fusion.
-            var searchLimit = Math.Min(
-                100,
-                Math.Max(limit * 5, 25));
+            var searchLimit = Math.Min(100, Math.Max(limit * 5, 25));
 
             // 3. Run dense and lexical retrieval.
-            var vectorResults = await _vectorStoreService.SearchAsync(embeddings[0], searchLimit, documentId, cancellationToken);
+            var vectorResults = await _vectorStoreService.SearchAsync(embeddings[0], searchLimit, documentIds, cancellationToken);
 
-            var lexicalResults = await _chunkRepository.SearchLexicallyAsync(query, searchLimit, documentId, cancellationToken);
+            var lexicalResults = await _chunkRepository.SearchLexicallyAsync(query, searchLimit, documentIds, cancellationToken);
 
             _logger.LogInformation(
                 "[HybridTrace] DenseCandidateCount={DenseCount}; " +
@@ -93,7 +90,7 @@ namespace Lexis.Core.Services
 
             // Store each eligible chunk once.
             var chunksById = denseChunks
-                .Where(chunk => !documentId.HasValue || chunk.DocumentId == documentId.Value)
+                .Where(chunk => documentIds.Contains(chunk.DocumentId))
                 .GroupBy(chunk => chunk.Id)
                 .ToDictionary(group => group.Key, group => group.First());
 
@@ -119,8 +116,7 @@ namespace Lexis.Core.Services
 
             foreach (var chunk in lexicalResults)
             {
-                if (documentId.HasValue &&
-                    chunk.DocumentId != documentId.Value)
+                if (!documentIds.Contains(chunk.DocumentId))
                 {
                     continue;
                 }
@@ -132,8 +128,7 @@ namespace Lexis.Core.Services
 
                 if (!lexicalRankById.ContainsKey(chunk.Id))
                 {
-                    lexicalRankById[chunk.Id] =
-                        lexicalRankById.Count + 1;
+                    lexicalRankById[chunk.Id] = lexicalRankById.Count + 1;
                 }
             }
 

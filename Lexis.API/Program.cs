@@ -22,9 +22,6 @@ builder.Services.AddControllers();
 // Learn more about configuring OpenAPI at https://aka.ms/aspnet/openapi
 builder.Services.AddOpenApi();
 
-builder.Services.AddDbContext<ApplicationDbContext> (options =>
-    options.UseNpgsql(builder.Configuration.GetConnectionString("DefaultConnection")));
-
 builder.Services
     .AddIdentity<ApplicationUser, IdentityRole<int>>(options =>
     {
@@ -127,6 +124,9 @@ builder.Services.AddScoped<ITableContinuationService, TableContinuationService>(
 builder.Services.AddScoped<TableContinuationHelpers>();
 builder.Services.AddScoped<TableContinuationAnalyzer>();
 builder.Services.AddScoped<IDocumentSearchService, DocumentSearchService>();
+builder.Services.AddScoped<IRagService, RagService>();
+builder.Services.AddScoped<IConversationService, ConversationService>();
+builder.Services.AddHttpClient<IAnswerGenerationService, OpenAiAnswerGenerationService>();
 
 var app = builder.Build();
 
