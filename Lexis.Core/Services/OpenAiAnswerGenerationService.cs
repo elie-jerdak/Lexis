@@ -1,8 +1,7 @@
 ﻿using Lexis.Core.DTOs.Generation;
 using Lexis.Core.Interfaces;
 using Microsoft.Extensions.Configuration;
-using System;
-using System.Collections.Generic;
+using Microsoft.Extensions.Logging;
 using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
@@ -13,16 +12,19 @@ namespace Lexis.Core.Services
     {
         private readonly HttpClient _httpClient;
         private readonly IConfiguration _configuration;
+        private readonly ILogger<OpenAiAnswerGenerationService> _logger;
 
         private static readonly JsonSerializerOptions JsonOptions = new()
         {
             PropertyNameCaseInsensitive = true
         };
 
-        public OpenAiAnswerGenerationService(HttpClient httpClient, IConfiguration configuration)
+        public OpenAiAnswerGenerationService(HttpClient httpClient, IConfiguration configuration,
+            ILogger<OpenAiAnswerGenerationService> logger)
         {
             _httpClient = httpClient;
             _configuration = configuration;
+            _logger = logger;
         }
 
         public async Task<AnswerGenerationResult> GenerateAsync(AnswerGenerationRequest request,
@@ -138,14 +140,9 @@ namespace Lexis.Core.Services
                 }
             };
 
-            var normalizedBaseUrl = baseUrl.EndsWith(
-                "/", StringComparison.Ordinal)
-                ? baseUrl
-                : baseUrl + "/";
+            var normalizedBaseUrl = baseUrl.EndsWith("/", StringComparison.Ordinal) ? baseUrl : baseUrl + "/";
 
-            var endpoint = new Uri(
-                new Uri(normalizedBaseUrl),
-                "chat/completions");
+            var endpoint = new Uri(new Uri(normalizedBaseUrl), "chat/completions");
 
             using var httpRequest = new HttpRequestMessage(HttpMethod.Post, endpoint);
 
@@ -176,6 +173,26 @@ namespace Lexis.Core.Services
                 throw new InvalidOperationException("OpenRouter returned no completion choices.");
             }
 
+            var inputTokens = 0;
+            var outputTokens = 0;
+
+            if (apiJson.RootElement.TryGetProperty("usage", out var usage) &&
+                usage.ValueKind == JsonValueKind.Object)
+            {
+                if (usage.TryGetProperty("prompt_tokens", out var promptTokens) &&
+                    promptTokens.TryGetInt32(out var parsedInputTokens))
+                {
+                    inputTokens = parsedInputTokens;
+                }
+
+                if (usage.TryGetProperty("completion_tokens", out var completionTokens) &&
+                    completionTokens.TryGetInt32(out var parsedOutputTokens))
+                {
+                    outputTokens = parsedOutputTokens;
+                }
+            }
+
+
             var firstChoice = choices[0];
 
             if (!firstChoice.TryGetProperty("message", out var message) || 
@@ -191,6 +208,8 @@ namespace Lexis.Core.Services
             {
                 throw new InvalidOperationException("OpenRouter returned an empty model response.");
             }
+
+            _logger.LogInformation("RAG generation raw model response: {ModelResponse}", content);
 
             // Tolerate a response wrapped in Markdown fences.
             var jsonStart = content.IndexOf('{');
@@ -214,11 +233,12 @@ namespace Lexis.Core.Services
                 throw new InvalidOperationException("The model returned malformed answer JSON.", ex);
             }
 
-            if (generated is null ||
-                string.IsNullOrWhiteSpace(generated.Answer))
+            if (generated is null || string.IsNullOrWhiteSpace(generated.Answer))
             {
                 throw new InvalidOperationException("The model returned an answer payload without an answer.");
             }
+
+            _logger.LogInformation("RAG generation parsed citations: {CitationIds}", JsonSerializer.Serialize(generated.Citations));
 
             var citations = (generated.Citations ?? new List<string>())
                 .Where(id => !string.IsNullOrWhiteSpace(id))
@@ -234,7 +254,9 @@ namespace Lexis.Core.Services
             {
                 Answer = generated.Answer.Trim(),
                 Citations = citations,
-                InsufficientEvidence = generated.InsufficientEvidence
+                InsufficientEvidence = generated.InsufficientEvidence,
+                InputTokens = inputTokens,
+                OutputTokens = outputTokens
             };
         }
 

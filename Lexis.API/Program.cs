@@ -9,6 +9,7 @@ using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
+using Npgsql;
 using Resend;
 using Scalar.AspNetCore;
 using System.Text;
@@ -19,7 +20,7 @@ builder.Services.Configure<JwtSettings>(
     builder.Configuration.GetSection("Jwt"));
 
 builder.Services.AddControllers();
-// Learn more about configuring OpenAPI at https://aka.ms/aspnet/openapi
+
 builder.Services.AddOpenApi();
 
 builder.Services
@@ -69,16 +70,46 @@ builder.Services.AddResend(options =>
         builder.Configuration["Resend:ApiKey"]!;
 });
 
-builder.Services.AddDbContext<ApplicationDbContext>(options =>
+
+
+builder.Services.AddSingleton<NpgsqlDataSource>(_ =>
 {
-    options.UseNpgsql(
-        builder.Configuration.GetConnectionString("DefaultConnection"),
-        npgsql =>
-        {
-            npgsql.MapEnum<DocumentStatus>("document_status");
-            npgsql.MapEnum<MessageRole>("message_role");
-        });
+    var connectionString =
+        builder.Configuration.GetConnectionString("DefaultConnection")
+        ?? throw new InvalidOperationException(
+            "Connection string 'DefaultConnection' is missing.");
+
+    var dataSourceBuilder = new NpgsqlDataSourceBuilder(connectionString);
+
+    dataSourceBuilder.MapEnum<DocumentStatus>("document_status");
+    dataSourceBuilder.MapEnum<MessageRole>("message_role");
+
+    return dataSourceBuilder.Build();
 });
+
+builder.Services.AddDbContext<ApplicationDbContext>((serviceProvider, options) =>
+{
+    var dataSource =
+        serviceProvider.GetRequiredService<NpgsqlDataSource>();
+
+    options.UseNpgsql(dataSource, npgsql =>
+    {
+        npgsql.MapEnum<DocumentStatus>("document_status");
+        npgsql.MapEnum<MessageRole>("message_role");
+    });
+});
+
+builder.Services.AddCors(options =>
+{
+    options.AddPolicy("Frontend", policy =>
+    {
+        policy
+            .WithOrigins("http://localhost:3000")
+            .AllowAnyHeader()
+            .AllowAnyMethod();
+    });
+});
+
 
 builder.Services.Configure<DataProtectionTokenProviderOptions>(options =>
 {
@@ -137,7 +168,9 @@ if (app.Environment.IsDevelopment())
     app.MapScalarApiReference();
 }
 
-app.UseHttpsRedirection();
+//app.UseHttpsRedirection();
+
+app.UseCors("Frontend");
 
 app.UseAuthentication();
 app.UseAuthorization();

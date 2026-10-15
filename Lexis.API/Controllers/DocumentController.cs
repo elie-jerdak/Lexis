@@ -8,12 +8,12 @@ namespace Lexis.API.Controllers
 {
     [Authorize]
     [Route("api/[controller]")]
-    public class DocumentsController : BaseApiController
+    public class DocumentController : BaseApiController
     {
         private readonly IDocumentService _documentService;
         private readonly IFileStorageService _fileStorageService;
 
-        public DocumentsController(IDocumentService documentService, IFileStorageService fileStorageService)
+        public DocumentController(IDocumentService documentService, IFileStorageService fileStorageService)
         {
             _documentService = documentService;
             _fileStorageService = fileStorageService;

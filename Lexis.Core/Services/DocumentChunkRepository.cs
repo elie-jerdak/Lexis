@@ -96,8 +96,7 @@ namespace Lexis.Core.Services
 
             if (termTokens.Count > 0)
             {
-                var strict = await RunLexicalQueryAsync(
-                    string.Join(" & ", termTokens), pgTerm, limit, documentIds, cancellationToken);
+                var strict = await RunLexicalQueryAsync(string.Join(" & ", termTokens), pgTerm, limit, documentIds, cancellationToken);
 
                 if (strict.Count > 0)
                     return strict;

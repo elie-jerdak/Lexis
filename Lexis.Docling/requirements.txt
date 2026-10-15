@@ -1,5 +1,5 @@
-docling
+docling==2.139.0
 fastapi
 uvicorn
 python-multipart
-docling-hierarchial-pdf
+docling-hierarchical-pdf==0.1.8

@@ -1,7 +1,4 @@
 ﻿using Lexis.Core.Enums;
-using System;
-using System.Collections.Generic;
-using System.Text;
 
 namespace Lexis.Core.DTOs.Document
 {
