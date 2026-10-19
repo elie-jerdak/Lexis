@@ -1,6 +1,5 @@
 
-const API_BASE_URL =
-    process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:5238";
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:5238";
 
 const ACCESS_TOKEN_KEY = "lexis_access_token";
 const REFRESH_TOKEN_KEY = "lexis_refresh_token";
@@ -22,10 +21,7 @@ export interface ApiErrorBody {
 export function saveAuth(auth: AuthResponse): void {
     sessionStorage.setItem(ACCESS_TOKEN_KEY, auth.accessToken);
     sessionStorage.setItem(REFRESH_TOKEN_KEY, auth.refreshToken);
-    sessionStorage.setItem(
-        TOKEN_EXPIRATION_KEY,
-        auth.accessTokenExpiration,
-    );
+    sessionStorage.setItem(TOKEN_EXPIRATION_KEY, auth.accessTokenExpiration);
 }
 
 export function getAccessToken(): string | null {

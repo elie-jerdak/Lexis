@@ -36,9 +36,7 @@ public sealed class OpenAiAnswerGenerationServiceTests
 
         try
         {
-            var service = new OpenAiAnswerGenerationService(
-                httpClient,
-                configuration);
+            var service = new OpenAiAnswerGenerationService(httpClient, configuration);
 
             var request = new AnswerGenerationRequest
             {

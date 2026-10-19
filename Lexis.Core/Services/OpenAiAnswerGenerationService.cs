@@ -56,9 +56,7 @@ namespace Lexis.Core.Services
             var model = _configuration[$"{providerSection}:Model"];
             var apiKey = _configuration[$"{providerSection}:ApiKey"];
 
-            if (string.IsNullOrWhiteSpace(baseUrl) ||
-                string.IsNullOrWhiteSpace(model) ||
-                string.IsNullOrWhiteSpace(apiKey))
+            if (string.IsNullOrWhiteSpace(baseUrl) || string.IsNullOrWhiteSpace(model) || string.IsNullOrWhiteSpace(apiKey))
             {
                 throw new InvalidOperationException(
                     "OpenRouter configuration is incomplete. " +
@@ -167,8 +165,7 @@ namespace Lexis.Core.Services
             using var apiJson = JsonDocument.Parse(responseBody);
 
             if (!apiJson.RootElement.TryGetProperty("choices", out var choices) ||
-                choices.ValueKind != JsonValueKind.Array ||
-                choices.GetArrayLength() == 0)
+                choices.ValueKind != JsonValueKind.Array || choices.GetArrayLength() == 0)
             {
                 throw new InvalidOperationException("OpenRouter returned no completion choices.");
             }

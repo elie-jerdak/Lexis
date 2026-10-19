@@ -43,7 +43,7 @@ public class ConversationsController : BaseApiController
             });
         }
 
-        return CreatedAtAction(nameof(GetMyConversations), result.Data);
+        return CreatedAtAction(nameof(GetMyConversations), null, result.Data);
     }
 
     [HttpGet]
@@ -145,5 +145,67 @@ public class ConversationsController : BaseApiController
         }
 
         return Ok(result.Data);
+    }
+
+    [HttpGet("{id:guid}/messages")]
+    public async Task<IActionResult> GetMessages(Guid id, CancellationToken cancellationToken)
+    {
+        var userId = GetUserId();
+        if (userId is null)
+        {
+            return Unauthorized(new { message = "User authentication information is missing.", code = "USER_ID_NOT_FOUND" });
+        }
+
+        var result = await _conversationService.GetMessagesAsync(userId.Value, id, cancellationToken);
+
+        if (!result.IsSuccess)
+        {
+            return NotFound(new { message = result.ErrorMessage, code = result.ErrorCode });
+        }
+
+        return Ok(result.Data);
+    }
+
+    [HttpPatch("{id:guid}")]
+    public async Task<IActionResult> Rename(Guid id, [FromBody] RenameConversationRequestDTO request,
+        CancellationToken cancellationToken)
+    {
+        var userId = GetUserId();
+        if (userId is null)
+        {
+            return Unauthorized(new { message = "User authentication information is missing.", code = "USER_ID_NOT_FOUND" });
+        }
+
+        var result = await _conversationService.RenameAsync(userId.Value, id, request, cancellationToken);
+
+        if (!result.IsSuccess)
+        {
+            var statusCode = result.ErrorCode == "CONVERSATION_NOT_FOUND"
+                ? StatusCodes.Status404NotFound
+                : StatusCodes.Status400BadRequest;
+
+            return StatusCode(statusCode, new { message = result.ErrorMessage, code = result.ErrorCode });
+        }
+
+        return Ok(result.Data);
+    }
+
+    [HttpDelete("{id:guid}")]
+    public async Task<IActionResult> Delete(Guid id, CancellationToken cancellationToken)
+    {
+        var userId = GetUserId();
+        if (userId is null)
+        {
+            return Unauthorized(new { message = "User authentication information is missing.", code = "USER_ID_NOT_FOUND" });
+        }
+
+        var result = await _conversationService.DeleteAsync(userId.Value, id, cancellationToken);
+
+        if (!result.IsSuccess)
+        {
+            return NotFound(new { message = result.ErrorMessage, code = result.ErrorCode });
+        }
+
+        return Ok(new { message = "Conversation deleted." });   // body, so the frontend's apiRequest can parse it
     }
 }

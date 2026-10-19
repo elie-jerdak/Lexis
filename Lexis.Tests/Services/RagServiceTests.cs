@@ -449,10 +449,7 @@ namespace Lexis.Tests.Services
             FakeAnswerGenerationService generator,
             params Guid[] documentIds)
         {
-            return new RagService(
-                search,
-                generator,
-                new FakeConversationService(documentIds));
+            return new RagService(search, generator, new FakeConversationService(documentIds));
         }
 
         private static DocumentChunk CreateChunk(

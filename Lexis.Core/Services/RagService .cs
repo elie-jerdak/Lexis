@@ -26,12 +26,8 @@ namespace Lexis.Core.Services
         private readonly ApplicationDbContext _dbContext;
         private readonly ILogger<RagService> _logger;
 
-        public RagService(
-            IDocumentSearchService documentSearchService,
-            IAnswerGenerationService answerGenerationService,
-            IConversationService conversationService,
-            ApplicationDbContext dbContext,
-            ILogger<RagService> logger)
+        public RagService(IDocumentSearchService documentSearchService, IAnswerGenerationService answerGenerationService,
+            IConversationService conversationService, ApplicationDbContext dbContext, ILogger<RagService> logger)
         {
             _documentSearchService = documentSearchService;
             _answerGenerationService = answerGenerationService;
@@ -40,10 +36,7 @@ namespace Lexis.Core.Services
             _logger = logger;
         }
 
-        public async Task<RagQueryResult> QueryAsync(
-            int userId,
-            RagQueryRequest request,
-            CancellationToken cancellationToken = default)
+        public async Task<RagQueryResult> QueryAsync(int userId, RagQueryRequest request, CancellationToken cancellationToken = default)
         {
             ArgumentNullException.ThrowIfNull(request);
 
@@ -65,9 +58,7 @@ namespace Lexis.Core.Services
             var stopwatch = Stopwatch.StartNew();
 
             // Validate that the conversation belongs to this user.
-            var documentsResult = await _conversationService.GetDocumentsAsync(
-                userId,
-                request.ConversationId,
+            var documentsResult = await _conversationService.GetDocumentsAsync(userId, request.ConversationId,
                 cancellationToken);
 
             if (!documentsResult.IsSuccess)
@@ -116,19 +107,13 @@ namespace Lexis.Core.Services
                 // No documents selected: persist an explanatory response.
                 if (documentIds.Length == 0)
                 {
-                    answer =
-                        "Please select at least one indexed document before asking a question.";
-
+                    answer = "Please select at least one indexed document before asking a question.";
                     insufficientEvidence = true;
                 }
                 else
                 {
                     // Step 1: retrieve chunks from selected documents.
-                    var searchResults =
-                        await _documentSearchService.SearchAsync(
-                            request.Question,
-                            documentIds,
-                            request.Limit,
+                    var searchResults = await _documentSearchService.SearchAsync(request.Question, documentIds, request.Limit,
                             cancellationToken);
 
                     // Step 2: abstain if retrieval found no evidence.
@@ -200,30 +185,23 @@ namespace Lexis.Core.Services
                             insufficientEvidence = false;
 
                             // Step 6: retain only valid, unique references.
-                            var usedReferences =
-                                new HashSet<string>(StringComparer.Ordinal);
+                            var usedReferences = new HashSet<string>(StringComparer.Ordinal);
 
-                            foreach (var citationReference in
-                                     generationResult.Citations)
+                            foreach (var citationReference in generationResult.Citations)
                             {
-                                if (citationReference is null ||
-                                    string.IsNullOrWhiteSpace(
-                                        citationReference.ReferenceId))
+                                if (citationReference is null || string.IsNullOrWhiteSpace(citationReference.ReferenceId))
                                 {
                                     continue;
                                 }
 
-                                var referenceId =
-                                    citationReference.ReferenceId;
+                                var referenceId = citationReference.ReferenceId;
 
                                 if (!usedReferences.Add(referenceId))
                                 {
                                     continue;
                                 }
 
-                                if (!contextByReference.TryGetValue(
-                                        referenceId,
-                                        out var contextItem))
+                                if (!contextByReference.TryGetValue(referenceId, out var contextItem))
                                 {
                                     continue;
                                 }
@@ -303,17 +281,9 @@ namespace Lexis.Core.Services
             };
         }
 
-        private async Task PersistCompletedRequestAsync(
-            int userId,
-            Guid conversationId,
-            DateTime requestTime,
-            long elapsedMilliseconds,
-            string answer,
-            bool insufficientEvidence,
-            IReadOnlyList<RagCitation> citations,
-            IReadOnlyDictionary<string, DocumentSearchResult> sourceByReference,
-            int inputTokens,
-            int outputTokens,
+        private async Task PersistCompletedRequestAsync(int userId, Guid conversationId, DateTime requestTime,
+            long elapsedMilliseconds, string answer, bool insufficientEvidence, IReadOnlyList<RagCitation> citations,
+            IReadOnlyDictionary<string, DocumentSearchResult> sourceByReference, int inputTokens, int outputTokens,
             CancellationToken cancellationToken)
         {
             var assistantMessage = new Message
@@ -386,13 +356,8 @@ namespace Lexis.Core.Services
                 outputTokens);
         }
 
-        private async Task PersistFailedRequestAsync(
-            int userId,
-            Guid conversationId,
-            DateTime requestTime,
-            long elapsedMilliseconds,
-            int inputTokens,
-            int outputTokens)
+        private async Task PersistFailedRequestAsync(int userId, Guid conversationId, DateTime requestTime, long elapsedMilliseconds,
+            int inputTokens, int outputTokens)
         {
             var assistantMessage = new Message
             {

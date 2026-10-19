@@ -1,10 +1,12 @@
 ﻿using Lexis.API.Data;
 using Lexis.Core.DTOs.Conversation;
+using Lexis.Core.DTOs.MessageCitation;
 using Lexis.Core.Enums;
 using Lexis.Core.Helpers;
 using Lexis.Core.Interfaces;
 using Lexis.Core.Models;
 using Microsoft.EntityFrameworkCore;
+using System.Text.Json;
 
 namespace Lexis.Core.Services
 {
@@ -229,6 +231,130 @@ namespace Lexis.Core.Services
 
             return ServiceResult<IReadOnlyList<ConversationDocumentDTO>>
                 .Success(selectedDocuments);
+        }
+
+        public async Task<ServiceResult<IReadOnlyList<ConversationMessageDTO>>> GetMessagesAsync(int userId, 
+            Guid conversationId, CancellationToken cancellationToken = default)
+        {
+            var conversationExists = await _context.Conversations
+                .AnyAsync(c => c.Id == conversationId && c.UserId == userId && !c.IsDeleted, cancellationToken);
+
+            if (!conversationExists)
+            {
+                return ServiceResult<IReadOnlyList<ConversationMessageDTO>>.Failure(
+                    "Conversation not found.", "CONVERSATION_NOT_FOUND");
+            }
+
+            var rows = await _context.Messages
+                .AsNoTracking()
+                .Where(m => m.ConversationId == conversationId
+                            && (m.Role == MessageRole.User || m.Role == MessageRole.Assistant))
+                .OrderBy(m => m.CreatedAt)
+                .Select(m => new
+                {
+                    m.Id,
+                    m.Role,
+                    m.Content,
+                    m.CreatedAt,
+                    Citations = m.MessageCitations
+                        .OrderByDescending(c => c.SimilarityScore)
+                        .Select(c => new
+                        {
+                            c.DocumentChunkId,
+                            c.DocumentChunk.StartPage,   // adjust to your DocumentChunk property names
+                            c.DocumentChunk.EndPage,
+                            c.DocumentChunk.Heading,
+                            c.DocumentChunk.HeadingPath
+                        })
+                        .ToList()
+                })
+                .ToListAsync(cancellationToken);
+
+            var messages = rows
+                .Select(m => new ConversationMessageDTO
+                {
+                    Id = m.Id,
+                    Role = m.Role == MessageRole.User ? "user" : "assistant",
+                    Content = m.Content,
+                    CreatedAt = m.CreatedAt,
+                    Citations = m.Citations
+                        .Select((c, i) => new MessageCitationDTO
+                        {
+                            ChunkId = c.DocumentChunkId,
+                            ReferenceId = $"S{i + 1}",
+                            StartPage = c.StartPage,
+                            EndPage = c.EndPage,
+                            Heading = c.Heading,
+                            HeadingPath = c.HeadingPath
+                        })
+                        .ToList()
+                })
+                .ToList();
+
+            return ServiceResult<IReadOnlyList<ConversationMessageDTO>>.Success(messages);
+        }
+
+        public async Task<ServiceResult<ConversationDTO>> RenameAsync(int userId, Guid conversationId, 
+            RenameConversationRequestDTO request, CancellationToken cancellationToken = default)
+        {
+            ArgumentNullException.ThrowIfNull(request);
+
+            var title = request.Title?.Trim();
+
+            if (string.IsNullOrEmpty(title))
+            {
+                return ServiceResult<ConversationDTO>.Failure(
+                    "The conversation title is required.", "TITLE_REQUIRED");
+            }
+
+            if (title.Length > 255)
+            {
+                return ServiceResult<ConversationDTO>.Failure(
+                    "The conversation title cannot exceed 255 characters.", "TITLE_TOO_LONG");
+            }
+
+            var conversation = await _context.Conversations
+                .FirstOrDefaultAsync(c => c.Id == conversationId && c.UserId == userId && !c.IsDeleted,
+                    cancellationToken);
+
+            if (conversation is null)
+            {
+                return ServiceResult<ConversationDTO>.Failure(
+                    "Conversation not found.", "CONVERSATION_NOT_FOUND");
+            }
+
+            conversation.Title = title;
+            conversation.UpdatedAt = DateTime.UtcNow;
+
+            await _context.SaveChangesAsync(cancellationToken);
+
+            return ServiceResult<ConversationDTO>.Success(new ConversationDTO
+            {
+                Id = conversation.Id,
+                Title = conversation.Title,
+                CreatedAt = conversation.CreatedAt,
+                UpdatedAt = conversation.UpdatedAt
+            });
+        }
+
+        public async Task<ServiceResult<bool>> DeleteAsync(int userId, Guid conversationId, 
+            CancellationToken cancellationToken = default)
+        {
+            var conversation = await _context.Conversations
+                .FirstOrDefaultAsync(c => c.Id == conversationId && c.UserId == userId && !c.IsDeleted,
+                    cancellationToken);
+
+            if (conversation is null)
+            {
+                return ServiceResult<bool>.Failure("Conversation not found.", "CONVERSATION_NOT_FOUND");
+            }
+
+            conversation.IsDeleted = true;   // soft delete, consistent with the rest of the service
+            conversation.UpdatedAt = DateTime.UtcNow;
+
+            await _context.SaveChangesAsync(cancellationToken);
+
+            return ServiceResult<bool>.Success(true);
         }
     }
 }
