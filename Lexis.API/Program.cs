@@ -12,7 +12,9 @@ using Microsoft.IdentityModel.Tokens;
 using Npgsql;
 using Resend;
 using Scalar.AspNetCore;
+using System.Security.Claims;
 using System.Text;
+using System.Threading.RateLimiting;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -158,6 +160,107 @@ builder.Services.AddHttpClient<IDocumentExtractionService, DoclingExtractionServ
     client.Timeout = TimeSpan.FromMinutes(235);
 });
 
+
+builder.Services.AddRateLimiter(options =>
+{
+    // General limit: 120 requests per minute per IP.
+    options.GlobalLimiter =
+        PartitionedRateLimiter.Create<HttpContext, string>(context =>
+            RateLimitPartition.GetFixedWindowLimiter(
+                partitionKey: GetClientIp(context),
+                factory: _ => new FixedWindowRateLimiterOptions
+                {
+                    PermitLimit = 120,
+                    Window = TimeSpan.FromMinutes(1),
+                    QueueLimit = 0,
+                    AutoReplenishment = true
+                }));
+
+    // Authentication endpoints: partition by IP.
+    options.AddPolicy("Login", context =>
+        CreateIpLimiter(context, 5));
+
+    options.AddPolicy("Register", context =>
+        CreateIpLimiter(context, 3));
+
+    options.AddPolicy("EmailConfirmation", context =>
+        CreateIpLimiter(context, 10));
+
+    options.AddPolicy("ResendConfirmation", context =>
+        CreateIpLimiter(context, 3));
+
+    options.AddPolicy("ForgotPassword", context =>
+        CreateIpLimiter(context, 3));
+
+    options.AddPolicy("ResetPassword", context =>
+        CreateIpLimiter(context, 5));
+
+    options.AddPolicy("ChangePassword", context =>
+        CreateUserLimiter(context, 5));
+
+    options.AddPolicy("Refresh", context =>
+        CreateIpLimiter(context, 10));
+
+    // Expensive operations: partition by authenticated user.
+    options.AddPolicy("DocumentUpload", context =>
+        CreateUserLimiter(context, 10));
+
+    options.AddPolicy("RagQuery", context =>
+        CreateUserLimiter(context, 10));
+
+    options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+
+    options.OnRejected = async (context, cancellationToken) =>
+    {
+        context.HttpContext.Response.ContentType = "application/json";
+
+        await context.HttpContext.Response.WriteAsJsonAsync(
+            new
+            {
+                message = "Too many requests. Please try again later."
+            },
+            cancellationToken);
+    };
+});
+
+static string GetClientIp(HttpContext context) =>
+    context.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+
+static FixedWindowRateLimiterOptions CreateLimiterOptions(int limit) =>
+    new()
+    {
+        PermitLimit = limit,
+        Window = TimeSpan.FromMinutes(1),
+        QueueLimit = 0,
+        AutoReplenishment = true
+    };
+
+static RateLimitPartition<string> CreateIpLimiter(
+    HttpContext context,
+    int limit) =>
+    RateLimitPartition.GetFixedWindowLimiter(
+        GetClientIp(context),
+        _ => CreateLimiterOptions(limit));
+
+static RateLimitPartition<string> CreateUserLimiter(
+    HttpContext context,
+    int limit)
+{
+    var userId =
+        context.User.FindFirst(ClaimTypes.NameIdentifier)?.Value
+        ?? context.User.FindFirst("sub")?.Value;
+
+    // Fall back to IP for unauthenticated requests.
+    var partitionKey = userId is not null
+        ? $"user:{userId}"
+        : $"ip:{GetClientIp(context)}";
+
+    return RateLimitPartition.GetFixedWindowLimiter(
+        partitionKey,
+        _ => CreateLimiterOptions(limit));
+}
+
+
 builder.Services.AddScoped<IJwtService, JwtService>();
 builder.Services.AddScoped<IAuthService, AuthenticationService>();
 builder.Services.AddScoped<IEmailService, EmailService>();
@@ -190,7 +293,7 @@ if (app.Environment.IsDevelopment())
     app.MapScalarApiReference();
 }
 
-//app.UseHttpsRedirection();
+app.UseRouting();
 
 app.UseCors("Frontend");
 
@@ -238,9 +341,7 @@ app.Use(async (context, next) =>
 });
 
 app.UseAuthentication();
-app.UseAuthorization();
-
-app.UseAuthentication();
+app.UseRateLimiter();
 app.UseAuthorization();
 
 app.MapControllers();

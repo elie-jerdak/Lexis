@@ -3,6 +3,7 @@ using Lexis.Core.Interfaces;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
 
 namespace Lexis.API.Controllers
 {
@@ -19,7 +20,7 @@ namespace Lexis.API.Controllers
             _fileStorageService = fileStorageService;
         }
 
-
+        [EnableRateLimiting("DocumentUpload")]
         [HttpPost]
         public async Task<IActionResult> Upload(IFormFile file)
         {

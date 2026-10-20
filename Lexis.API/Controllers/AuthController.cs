@@ -3,6 +3,7 @@ using Lexis.Core.DTOs.Auth;
 using Lexis.Core.Interfaces;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
 using System.Security.Claims;
 
 namespace Lexis.API.Controllers
@@ -21,7 +22,7 @@ namespace Lexis.API.Controllers
             _environment = environment;
         }
 
-
+        [EnableRateLimiting("Register")]
         [HttpPost("register")]
         public async Task<IActionResult> Register(RegisterRequestDTO request)
         {
@@ -39,6 +40,7 @@ namespace Lexis.API.Controllers
             return Created("", result.Data);
         }
 
+        [EnableRateLimiting("Login")]
         [HttpPost("login")]
         public async Task<IActionResult> Login(LoginRequestDTO request)
         {
@@ -60,6 +62,7 @@ namespace Lexis.API.Controllers
             return Ok(new { message = result.Data.Message });
         }
 
+        [EnableRateLimiting("Refresh")]
         [HttpPost("refresh")]
         public async Task<IActionResult> Refresh()
         {
@@ -100,6 +103,7 @@ namespace Lexis.API.Controllers
             return Ok(new { message = result.Data.Message });
         }
 
+        [EnableRateLimiting("EmailConfirmation")]
         [HttpPost("logout")]
         public async Task<IActionResult> Logout()
         {
@@ -126,6 +130,7 @@ namespace Lexis.API.Controllers
             return Ok(new { message = "Logout successful." });
         }
 
+        [EnableRateLimiting("EmailConfirmation")]
         [HttpGet("confirm-email")]
         public async Task<IActionResult> ConfirmEmail([FromQuery] int userId, [FromQuery] string token)
         {
@@ -163,6 +168,7 @@ namespace Lexis.API.Controllers
                 "text/html");
         }
 
+        [EnableRateLimiting("ResendConfirmation")]
         [HttpPost("resend-confirmation-email")]
         public async Task<IActionResult> ResendConfirmationEmail(ResendConfirmationEmailRequestDTO request)
         {
@@ -183,6 +189,7 @@ namespace Lexis.API.Controllers
             });
         }
 
+        [EnableRateLimiting("ForgotPassword")]
         [HttpPost("forgot-password")]
         public async Task<IActionResult> ForgotPassword(ForgotPasswordRequestDTO request)
         {
@@ -203,49 +210,7 @@ namespace Lexis.API.Controllers
             });
         }
 
-        //delete this entire endpoint once the frontend is finished
-        [HttpGet("reset-password-page")]
-        public IActionResult ResetPasswordPage(string email, string token)
-        {
-            return Content(
-            $"""
-    <html>
-    <body style="font-family:Arial;text-align:center">
-
-    <h2>Reset Password</h2>
-
-    <form method="post" action="/api/auth/reset-password">
-
-        <input 
-            name="Email"
-            value="{email}"
-            hidden />
-
-        <textarea 
-            name="Token"
-            hidden>{token}</textarea>
-
-
-        <input
-            name="NewPassword"
-            type="password"
-            placeholder="New Password"
-            required />
-
-        <br/><br/>
-
-        <button type="submit">
-            Reset Password
-        </button>
-
-    </form>
-
-    </body>
-    </html>
-    """,
-            "text/html");
-        }
-
+        [EnableRateLimiting("ResetPassword")]
         [HttpPost("reset-password")]
         public async Task<IActionResult> ResetPassword([FromForm] ResetPasswordRequestDTO request)
         {
@@ -268,6 +233,7 @@ namespace Lexis.API.Controllers
             });
         }
 
+        [EnableRateLimiting("ChangePassword")]
         [Authorize]
         [HttpPut("change-password")]
         public async Task<IActionResult> ChangePassword(ChangePasswordRequestDTO request)

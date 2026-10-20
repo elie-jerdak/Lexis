@@ -3,6 +3,7 @@ using Lexis.Core.DTOs.RAG;
 using Lexis.Core.Interfaces;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
 using System.Security.Claims;
 
 namespace Lexis.API.Controllers
@@ -19,6 +20,7 @@ namespace Lexis.API.Controllers
             _ragService = ragService;
         }
 
+        [EnableRateLimiting("RagQuery")]
         [HttpPost("query")]
         public async Task<IActionResult> Query([FromBody] RagQueryRequest request, CancellationToken cancellationToken)
         {
