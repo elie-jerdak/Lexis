@@ -115,12 +115,16 @@ builder.Services.AddDbContext<ApplicationDbContext>((serviceProvider, options) =
     });
 });
 
+var allowedFrontendOrigins =
+    builder.Configuration.GetSection("Cors:AllowedOrigins").Get<string[]>()
+    ?? new[] { "http://localhost:3000" };
+
 builder.Services.AddCors(options =>
 {
     options.AddPolicy("Frontend", policy =>
     {
         policy
-            .WithOrigins("http://localhost:3000")
+            .WithOrigins(allowedFrontendOrigins)
             .AllowAnyHeader()
             .AllowAnyMethod()
             .AllowCredentials();
@@ -189,6 +193,52 @@ if (app.Environment.IsDevelopment())
 //app.UseHttpsRedirection();
 
 app.UseCors("Frontend");
+
+app.Use(async (context, next) =>
+{
+    var request = context.Request;
+
+    var isStateChangingMethod =
+        HttpMethods.IsPost(request.Method) ||
+        HttpMethods.IsPut(request.Method) ||
+        HttpMethods.IsPatch(request.Method) ||
+        HttpMethods.IsDelete(request.Method);
+
+    var hasAuthCookie =
+        request.Cookies.ContainsKey("lexis_access_token") ||
+        request.Cookies.ContainsKey("lexis_refresh_token");
+
+    if (isStateChangingMethod && hasAuthCookie)
+    {
+        var origin = request.Headers["Origin"].ToString();
+
+        var isAllowedOrigin =
+            !string.IsNullOrWhiteSpace(origin) &&
+            allowedFrontendOrigins.Contains(
+                origin,
+                StringComparer.OrdinalIgnoreCase);
+
+        if (!isAllowedOrigin)
+        {
+            context.Response.StatusCode =
+                StatusCodes.Status403Forbidden;
+
+            context.Response.ContentType = "application/json";
+
+            await context.Response.WriteAsJsonAsync(new
+            {
+                message = "Request origin is not allowed."
+            });
+
+            return;
+        }
+    }
+
+    await next();
+});
+
+app.UseAuthentication();
+app.UseAuthorization();
 
 app.UseAuthentication();
 app.UseAuthorization();
