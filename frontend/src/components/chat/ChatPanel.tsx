@@ -211,7 +211,9 @@ export default function ChatPanel({
     <>
       {/* Header */}
       <div className="flex items-center gap-2 border-b border-slate-100 bg-white px-4 py-3 sm:px-5 lg:gap-3 lg:px-6">
-        <div className="flex min-w-0 flex-1 items-center gap-2">
+        <div className="flex min-w-0 flex-1 items-center gap-2 justify-between">
+          
+          {/* Conversation title and ID */}
           <div className="min-w-0">
             <h1 className="truncate text-lg font-bold text-slate-800 sm:text-xl">
               {conversationTitle || "New Conversation"}
@@ -243,17 +245,11 @@ export default function ChatPanel({
         {selectedDocuments.length > 0 && (
           <div className="hidden max-w-[45%] flex-wrap justify-end gap-2 lg:flex">
             {selectedDocuments.map((document) => (
-              <span
-                key={document.id}
-                className="inline-flex max-w-full items-center gap-1.5 rounded-full bg-violet-50 px-2.5 py-1 text-xs font-medium text-violet-700"
-              >
+              <span key={document.id} className="inline-flex max-w-full items-center gap-1.5 
+              rounded-full bg-violet-50 px-2.5 py-1 text-xs font-medium text-violet-700">
                 <span className="max-w-[200px] truncate">{document.name}</span>
-                <button
-                  type="button"
-                  aria-label={`Remove ${document.name}`}
-                  onClick={() => onToggleDocument(document.id, false)}
-                  className="text-sm font-semibold leading-none transition hover:text-violet-900"
-                >
+                <button type="button" aria-label={`Remove ${document.name}`} onClick={() => onToggleDocument(document.id, false)}
+                  className="text-sm font-semibold leading-none transition hover:text-violet-900">
                   ×
                 </button>
               </span>

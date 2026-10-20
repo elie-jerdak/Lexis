@@ -114,10 +114,7 @@ export default function LoginPage() {
 
                     <p className="mt-6 text-center text-sm text-slate-500">
                         Need an account?{" "}
-                        <Link
-                            href="/register"
-                            className="font-medium text-slate-900 underline underline-offset-4"
-                        >
+                        <Link href="/register" className="font-medium text-slate-900 underline underline-offset-4">
                             Create one
                         </Link>
                     </p>

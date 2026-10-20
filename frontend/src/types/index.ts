@@ -30,10 +30,11 @@ export type ChatMessage = {
   citations?: RagCitation[]; insufficientEvidence?: boolean;
 };
 
-export type NavItem = "Overview" | "Chat";
+export type NavItem = "Overview" | "Chat" | "Usage Logs";
 
 export const navItems = [
   { label: "Overview", icon: "grid" },
-  { label: "Chat", icon: "message" }
+  { label: "Chat", icon: "message" },
+  { label: "Usage Logs", icon: "chart-bar" },
 ] as const;
 

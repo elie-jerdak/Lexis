@@ -1,16 +1,19 @@
-
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { apiRequest, getAccessToken } from "@/lib/api";
+import { apiRequest, authenticatedFetch, logout } from "@/lib/api";
 import { createPortal } from "react-dom";
 import { Icon } from "@/components/ui/Icon";
 import ChatPanel from "@/components/chat/ChatPanel";
 import { navItems, type ChatMessage, type ConversationDto, type DocumentDto, type DocumentItem, type DocumentStatus, type NavItem, type RagQueryResponse } from "@/types";
 import { mapDocument } from "@/lib/document-utils";
 import { SidebarToggleButton } from "@/components/ui/SidebarToggleButton";
+import UsageLogsPanel from "@/components/usage-logs/UsageLogsPanel";
+import { useRouter } from "next/navigation";
 
 export default function Home() {
+  const router = useRouter();
+  const [isCheckingAuth, setIsCheckingAuth] = useState(true);
   const [activeNav, setActiveNav] = useState<NavItem>("Overview");
   const [documents, setDocuments] = useState<DocumentItem[]>([]);
   const [openDocumentMenuId, setOpenDocumentMenuId] = useState<string | null>(null);
@@ -59,6 +62,11 @@ export default function Home() {
     }
   }
 
+  async function handleLogout() {
+    await logout();
+    router.replace("/login");
+  }
+
   useEffect(() => {
     if (!isMobileSidebarOpen) return;
     const onKeyDown = (event: KeyboardEvent) => {
@@ -70,7 +78,31 @@ export default function Home() {
 
   useEffect(() => { chatEndRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages, isSendingMessage]);
 
-  useEffect(() => { void loadDocuments(); void loadConversations(); }, []);
+  useEffect(() => {
+    let cancelled = false;
+
+    async function initializeDashboard() {
+      try {
+        await apiRequest<{ authenticated: boolean }>("/api/Auth/session");
+
+        if (cancelled) return;
+
+        setIsCheckingAuth(false);
+        void loadDocuments();
+        void loadConversations();
+      } catch {
+        if (!cancelled) {
+          router.replace("/login");
+        }
+      }
+    }
+
+    void initializeDashboard();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [router]);
 
   async function loadConversations() {
     try {
@@ -254,24 +286,8 @@ export default function Home() {
 
   async function handleDownload(document: DocumentItem) {
     try {
-      const token = getAccessToken();
 
-      if (!token) {
-        setNotice("Your session has expired. Please log in again.");
-        return;
-      }
-
-      const apiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:5238";
-
-      const response = await fetch(
-        `${apiBaseUrl}/api/Document/${encodeURIComponent(document.id)}/download`,
-        {
-          method: "GET",
-          headers: {
-            Authorization: `Bearer ${token}`,
-          },
-        },
-      );
+      const response = await authenticatedFetch(`/api/Document/${document.id}/download`);
 
       if (!response.ok) {
         let message = `Download failed (${response.status}).`;
@@ -628,6 +644,14 @@ export default function Home() {
     fileInputRef.current?.click();
   }
 
+  if (isCheckingAuth) {
+    return (
+      <main className="flex min-h-screen items-center justify-center bg-[#f8f9fc]">
+        <p className="text-sm text-slate-500">Checking your session...</p>
+      </main>
+    );
+  }
+
   return (
     <>
       <div className="min-h-screen bg-[#f8f9fc] text-slate-900">
@@ -790,6 +814,14 @@ export default function Home() {
                 <Icon name="settings" size={18} />Settings
               </button>
               
+              <button type="button" onClick={() => void handleLogout()}
+                className="flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-sm text-slate-600 
+                transition hover:bg-slate-100 hover:text-slate-900"
+              >
+                <Icon name="log-out" />
+                <span>Log out</span>
+              </button>
+
               <div className="mt-3 flex items-center gap-3 border-t border-slate-100 px-2 pt-4">
                 <div className="flex h-9 w-9 items-center justify-center rounded-full bg-slate-200 text-xs font-bold text-slate-600">
                   U
@@ -808,6 +840,8 @@ export default function Home() {
                 </button>
 
               </div>
+
+              
             </div>
           </aside>
 
@@ -852,6 +886,8 @@ export default function Home() {
                   onRetryMessage={retryMessage}
                 />
 
+              ) : activeNav === "Usage Logs" ? (
+                <UsageLogsPanel />
               ) : (
                 <>
                   
