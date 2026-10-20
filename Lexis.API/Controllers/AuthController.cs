@@ -11,10 +11,14 @@ namespace Lexis.API.Controllers
     public class AuthController : BaseApiController
     {
         private readonly IAuthService _authService;
+        private readonly IWebHostEnvironment _environment;
+        private const string AccessCookie = "lexis_access_token";
+        private const string RefreshCookie = "lexis_refresh_token";
 
-        public AuthController(IAuthService authService)
+        public AuthController(IAuthService authService, IWebHostEnvironment environment)
         {
             _authService = authService;
+            _environment = environment;
         }
 
 
@@ -40,7 +44,7 @@ namespace Lexis.API.Controllers
         {
             var result = await _authService.LoginAsync(request);
 
-            if (!result.IsSuccess)
+            if (!result.IsSuccess || result.Data is null)
             {
                 return Unauthorized(new
                 {
@@ -49,44 +53,77 @@ namespace Lexis.API.Controllers
                 });
             }
 
-            return Ok(result.Data);
+            SetAuthCookies(result.Data);
+
+            Response.Headers.CacheControl = "no-store";
+
+            return Ok(new { message = result.Data.Message });
         }
 
         [HttpPost("refresh")]
-        public async Task<IActionResult> Refresh(RefreshTokenRequestDTO request)
+        public async Task<IActionResult> Refresh()
         {
-            var result = await _authService.RefreshTokenAsync(request);
+            var refreshToken = Request.Cookies[RefreshCookie];
 
-            if (!result.IsSuccess)
+            if (string.IsNullOrWhiteSpace(refreshToken))
             {
-                return BadRequest(new
+                ClearAuthCookies();
+
+                return Unauthorized(new
+                {
+                    message = "Refresh token is missing.",
+                    code = "INVALID_REFRESH_TOKEN"
+                });
+            }
+
+            var result = await _authService.RefreshTokenAsync(
+                new RefreshTokenRequestDTO
+                {
+                    RefreshToken = refreshToken
+                });
+
+            if (!result.IsSuccess || result.Data is null)
+            {
+                ClearAuthCookies();
+
+                return Unauthorized(new
                 {
                     message = result.ErrorMessage,
                     code = result.ErrorCode
                 });
             }
 
-            return Ok(result.Data);
+            SetAuthCookies(result.Data);
+
+            Response.Headers.CacheControl = "no-store";
+
+            return Ok(new { message = result.Data.Message });
         }
 
         [HttpPost("logout")]
-        public async Task<IActionResult> Logout(LogoutRequestDTO request)
+        public async Task<IActionResult> Logout()
         {
-            var result = await _authService.LogoutAsync(request);
+            var refreshToken = Request.Cookies[RefreshCookie];
 
-            if (!result.IsSuccess)
+            try
             {
-                return BadRequest(new
+                if (!string.IsNullOrWhiteSpace(refreshToken))
                 {
-                    message = result.ErrorMessage,
-                    code = result.ErrorCode
-                });
+                    await _authService.LogoutAsync(
+                        new LogoutRequestDTO
+                        {
+                            RefreshToken = refreshToken
+                        });
+                }
+            }
+            finally
+            {
+                ClearAuthCookies();
             }
 
-            return Ok(new
-            {
-                message = "Logout successful."
-            });
+            Response.Headers.CacheControl = "no-store";
+
+            return Ok(new { message = "Logout successful." });
         }
 
         [HttpGet("confirm-email")]
@@ -266,5 +303,52 @@ namespace Lexis.API.Controllers
                 message = "Password changed successfully. Please login again."
             });
         }
+
+        [Authorize]
+        [HttpGet("session")]
+        public IActionResult Session()
+        {
+            Response.Headers.CacheControl = "no-store";
+
+            var isAdmin = User.IsInRole("Admin");
+
+            return Ok(new
+            {
+                authenticated = true,
+                isAdmin
+            });
+        }
+
+        private CookieOptions CreateCookieOptions()
+        {
+            return new CookieOptions
+            {
+                HttpOnly = true,
+                Secure = !_environment.IsDevelopment() || Request.IsHttps,
+                SameSite = SameSiteMode.Lax,
+                Path = "/",
+                IsEssential = true
+            };
+        }
+
+        private void SetAuthCookies(AuthResponseDTO auth)
+        {
+            var accessOptions = CreateCookieOptions();
+            accessOptions.Expires = auth.AccessTokenExpiration;
+
+            Response.Cookies.Append(AccessCookie, auth.AccessToken!, accessOptions);
+
+            // Session cookie: the server remains responsible for checking the refresh token's real expiration and revocation.
+            Response.Cookies.Append(RefreshCookie, auth.RefreshToken!, CreateCookieOptions());
+        }
+
+        private void ClearAuthCookies()
+        {
+            var options = CreateCookieOptions();
+
+            Response.Cookies.Delete(AccessCookie, options);
+            Response.Cookies.Delete(RefreshCookie, options);
+        }
+
     }
 }

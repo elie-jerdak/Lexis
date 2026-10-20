@@ -7,12 +7,10 @@ using Npgsql;
 
 namespace Lexis.API.Data;
 
-public partial class ApplicationDbContext
-    : IdentityDbContext<ApplicationUser, IdentityRole<int>, int>
+public partial class ApplicationDbContext : IdentityDbContext<ApplicationUser, IdentityRole<int>, int>
 {
 
-    public ApplicationDbContext(DbContextOptions<ApplicationDbContext> options)
-        : base(options)
+    public ApplicationDbContext(DbContextOptions<ApplicationDbContext> options) : base(options)
     {
     }
 
