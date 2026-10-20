@@ -55,6 +55,25 @@ builder.Services
                 Encoding.UTF8.GetBytes(builder.Configuration["Jwt:Key"]!)
             )
         };
+
+        options.Events = new JwtBearerEvents
+        {
+            OnMessageReceived = context =>
+            {
+                // Keep Bearer authentication available for API tools and
+                // non-browser clients during the migration.
+                if (string.IsNullOrEmpty(
+                        context.Request.Headers.Authorization) &&
+                    context.Request.Cookies.TryGetValue(
+                        "lexis_access_token",
+                        out var token))
+                {
+                    context.Token = token;
+                }
+
+                return Task.CompletedTask;
+            }
+        };
     });
 
 builder.Services.AddSingleton(
@@ -69,8 +88,6 @@ builder.Services.AddResend(options =>
     options.ApiToken =
         builder.Configuration["Resend:ApiKey"]!;
 });
-
-
 
 builder.Services.AddSingleton<NpgsqlDataSource>(_ =>
 {
@@ -89,8 +106,7 @@ builder.Services.AddSingleton<NpgsqlDataSource>(_ =>
 
 builder.Services.AddDbContext<ApplicationDbContext>((serviceProvider, options) =>
 {
-    var dataSource =
-        serviceProvider.GetRequiredService<NpgsqlDataSource>();
+    var dataSource = serviceProvider.GetRequiredService<NpgsqlDataSource>();
 
     options.UseNpgsql(dataSource, npgsql =>
     {
@@ -106,7 +122,8 @@ builder.Services.AddCors(options =>
         policy
             .WithOrigins("http://localhost:3000")
             .AllowAnyHeader()
-            .AllowAnyMethod();
+            .AllowAnyMethod()
+            .AllowCredentials();
     });
 });
 
@@ -158,6 +175,7 @@ builder.Services.AddScoped<IDocumentSearchService, DocumentSearchService>();
 builder.Services.AddScoped<IRagService, RagService>();
 builder.Services.AddScoped<IConversationService, ConversationService>();
 builder.Services.AddHttpClient<IAnswerGenerationService, OpenAiAnswerGenerationService>();
+builder.Services.AddScoped<IUsageLogService, UsageLogService>();
 
 var app = builder.Build();
 
