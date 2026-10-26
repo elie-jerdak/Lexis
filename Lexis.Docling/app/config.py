@@ -15,7 +15,7 @@ def configure_environment():
     # (one from PyTorch, one from numpy/scipy) collide and hang silently
     # right after model weights finish loading.
     os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
-    os.environ.setdefault("OMP_NUM_THREADS", "1")
+    os.environ.setdefault("OMP_NUM_THREADS", "6")
 
     # Hugging Face Hub has no download timeout by default, so a stalled
     # connection (e.g. CDN host blocked/throttled by a firewall or proxy)

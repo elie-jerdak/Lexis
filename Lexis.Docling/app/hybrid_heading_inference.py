@@ -7,7 +7,8 @@ from docling_core.types.doc import BoundingBox, CoordOrigin, ProvenanceItem
 from docling_core.types.doc.document import TableItem
 
 from app.logging_config import log
-
+#from app.page_export import export_markdown_pages, FAST_EXPORT
+from app import page_export
 
 @dataclass
 class HeadingCandidate:
@@ -97,16 +98,9 @@ class HybridHeadingInferenceService:
 
         headings = []
 
-        page_numbers = sorted(document.pages.keys())
-
-        for page_no in page_numbers:
-
-            markdown = document.export_to_markdown(
-                page_no=page_no
-            )
-
+        #for page_no, markdown in export_markdown_pages(document, fast=FAST_EXPORT).items():
+        for page_no, markdown in page_export.export_markdown_pages(document, fast=page_export.FAST_EXPORT).items():
             for line in markdown.splitlines():
-
                 match = self.MARKDOWN_HEADING_RE.match(line)
 
                 if not match:
@@ -127,7 +121,7 @@ class HybridHeadingInferenceService:
                 )
 
                 headings.append(candidate)
-  
+
         return headings
 
     # ------------------------------------------------------------------

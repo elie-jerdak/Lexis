@@ -26,6 +26,11 @@ log.info(f"docling imported in {time.time() - _t0:.2f}s")
 # DocumentConverter() does NOT work — it's silently ignored. It must go
 # through PdfPipelineOptions + format_options. --- 
 pipeline_options = PdfPipelineOptions()
+try:
+    from docling.datamodel.accelerator_options import AcceleratorOptions, AcceleratorDevice
+except ImportError:
+    from docling.datamodel.pipeline_options import AcceleratorOptions, AcceleratorDevice
+pipeline_options.accelerator_options = AcceleratorOptions(num_threads=6, device=AcceleratorDevice.CPU)
 pipeline_options.do_ocr = True
 pipeline_options.do_table_structure = True
 # TableFormerMode.ACCURATE gives better table results than the default
