@@ -14,13 +14,15 @@ namespace Lexis.Core.Services
         private readonly ApplicationDbContext _context;
         private readonly IFileStorageService _fileStorageService;
         private readonly IFileHashService _fileHashService;
+        private readonly IDocumentProcessingLeaseService _processingLeaseService;
 
         public DocumentService(ApplicationDbContext context, IFileStorageService fileStorageService,
-            IFileHashService fileHashService)
+            IFileHashService fileHashService, IDocumentProcessingLeaseService processingLeaseService)
         {
             _context = context;
             _fileStorageService = fileStorageService;
             _fileHashService = fileHashService;
+            _processingLeaseService = processingLeaseService;
         }
 
         public async Task<ServiceResult<UploadDocumentResponseDTO>> UploadDocumentAsync(int userId, IFormFile file)
@@ -211,6 +213,68 @@ namespace Lexis.Core.Services
 
 
             return ServiceResult<Document>.Success(document);
+        }
+
+        public async Task<ServiceResult<DocumentStatus>> RetryDocumentUploadAsync(
+    int userId,
+    Guid documentId,
+    CancellationToken cancellationToken = default)
+        {
+            var document = await _context.Documents
+                .AsNoTracking()
+                .Where(d =>
+                    d.Id == documentId &&
+                    d.UploadedBy == userId)
+                .Select(d => new
+                {
+                    d.Status,
+                    d.ProcessingLeaseExpiresAt
+                })
+                .FirstOrDefaultAsync(cancellationToken);
+
+            if (document == null)
+            {
+                return ServiceResult<DocumentStatus>.Failure(
+                    "Document not found.",
+                    "DOCUMENT_NOT_FOUND");
+            }
+
+            if (document.Status == DocumentStatus.Indexed)
+            {
+                return ServiceResult<DocumentStatus>.Failure(
+                    "This document is already indexed.",
+                    "DOCUMENT_ALREADY_INDEXED");
+            }
+
+            if (document.Status == DocumentStatus.Pending)
+            {
+                return ServiceResult<DocumentStatus>.Success(
+                    DocumentStatus.Pending);
+            }
+
+            if ((document.Status == DocumentStatus.Processing ||
+                 document.Status == DocumentStatus.Chunked) &&
+                document.ProcessingLeaseExpiresAt > DateTime.UtcNow)
+            {
+                return ServiceResult<DocumentStatus>.Failure(
+                    "This document is still being processed. Please try again later.",
+                    "DOCUMENT_PROCESSING_ACTIVE");
+            }
+
+            var queued = await _processingLeaseService.TryQueueRetryAsync(
+                documentId,
+                userId,
+                cancellationToken);
+
+            if (!queued)
+            {
+                return ServiceResult<DocumentStatus>.Failure(
+                    "The document state changed before it could be retried. Refresh the document status and try again.",
+                    "DOCUMENT_RETRY_CONFLICT");
+            }
+
+            return ServiceResult<DocumentStatus>.Success(
+                DocumentStatus.Pending);
         }
     }
 }

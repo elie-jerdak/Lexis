@@ -267,5 +267,46 @@ namespace Lexis.Core.Services
             return results;
         }
 
+        public async Task DeleteByDocumentIdAsync(Guid documentId, CancellationToken cancellationToken = default)
+        {
+            if (documentId == Guid.Empty)
+            {
+                throw new ArgumentException(
+                    "Document ID cannot be empty.",
+                    nameof(documentId));
+            }
+
+            var collectionPath = $"collections/{Uri.EscapeDataString(_options.CollectionName)}/points/delete?wait=true";
+
+            var request = new
+            {
+                filter = new
+                {
+                    must = new[]
+                    {
+                        new
+                        {
+                            key = "document_id",
+                            match = new
+                            {
+                                value = documentId.ToString("D")
+                            }
+                        }
+                    }
+                }
+            };
+
+            using var response = await _httpClient.PostAsJsonAsync(collectionPath, request, cancellationToken);
+
+            if (!response.IsSuccessStatusCode)
+            {
+                var error = await response.Content.ReadAsStringAsync(
+                    cancellationToken);
+
+                throw new HttpRequestException(
+                    $"Qdrant vector deletion failed for document {documentId}. " +
+                    $"Status: {(int)response.StatusCode}. {error}");
+            }
+        }
     }
 }

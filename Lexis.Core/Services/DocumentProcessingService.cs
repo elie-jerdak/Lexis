@@ -1,8 +1,13 @@
 ﻿using Lexis.API.Data;
+using Lexis.Core.DTOs.DocumentProcessing;
 using Lexis.Core.Enums;
+using Lexis.Core.Helpers;
 using Lexis.Core.Interfaces;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
+using System.Security.Claims;
 using System.Text.Json;
 
 namespace Lexis.Core.Services
@@ -17,11 +22,18 @@ namespace Lexis.Core.Services
         private readonly IDocumentChunkRepository _documentChunkRepository;
         private readonly IEmbeddingService _embeddingService;
         private readonly IVectorStoreService _vectorStoreService;
+        private readonly IFileStorageService _fileStorageService;
+        private readonly IDocumentProcessingLeaseService _leaseService;
+        private readonly IServiceScopeFactory _scopeFactory;
+        private readonly IOptions<DocumentProcessingOptions> _processingOptions;
+        private readonly IDocumentStatusNotifier _documentStatusNotifier;
 
         public DocumentProcessingService(ApplicationDbContext context, ILogger<DocumentProcessingService> logger,
             IDocumentExtractionService documentExtractionService, IDocumentPreprocessingService preprocessingService,
             IDocumentChunkingService documentChunkingService, IDocumentChunkRepository documentChunkRepository,
-            IEmbeddingService embeddingService, IVectorStoreService vectorStoreService)
+            IEmbeddingService embeddingService, IVectorStoreService vectorStoreService, IFileStorageService fileStorageService,
+            IDocumentProcessingLeaseService leaseService, IServiceScopeFactory scopeFactory, 
+            IOptions<DocumentProcessingOptions> processingOptions, IDocumentStatusNotifier documentStatusNotifier)
         {
             _context = context;
             _logger = logger;
@@ -31,56 +43,55 @@ namespace Lexis.Core.Services
             _documentChunkRepository = documentChunkRepository;
             _embeddingService = embeddingService;
             _vectorStoreService = vectorStoreService;
+            _fileStorageService = fileStorageService;
+            _leaseService = leaseService;
+            _scopeFactory = scopeFactory;
+            _processingOptions = processingOptions;
+            _documentStatusNotifier = documentStatusNotifier;
         }
 
         public async Task ProcessPendingDocumentsAsync(CancellationToken cancellationToken)
         {
-            // Recover documents that were interrupted (application crash, deployment, etc.)
-            var timeout = DateTime.UtcNow.AddMinutes(-30);
-
-            var stuckDocuments = await _context.Documents
-                .Where(d =>
-                    d.Status == DocumentStatus.Processing &&
-                    d.ProcessingStartedAt != null &&
-                    d.ProcessingStartedAt < timeout)
-                .ToListAsync(cancellationToken);
-
-            foreach (var document in stuckDocuments)
+            while (!cancellationToken.IsCancellationRequested)
             {
-                document.Status = DocumentStatus.Pending;
-                document.ProcessingStartedAt = null;
-                document.ProcessingCompletedAt = null;
-                document.ProcessingError = "Processing timed out. Retrying.";
-            }
+                var claim = await _leaseService.ClaimNextAsync(cancellationToken);
 
-            if (stuckDocuments.Any())
-            {
-                await _context.SaveChangesAsync(cancellationToken);
-            }
+                if (claim is null)
+                    return;
 
-            var documents = await _context.Documents
-                .Where(d => d.Status == DocumentStatus.Pending)
-                .ToListAsync(cancellationToken);
-
-            foreach (var document in documents)
-            {
-                cancellationToken.ThrowIfCancellationRequested();
-
-                await ProcessDocumentAsync(document.Id, cancellationToken);
+                await ProcessClaimedDocumentAsync(claim, cancellationToken);
             }
         }
 
         public async Task ProcessDocumentAsync(Guid documentId, CancellationToken cancellationToken)
         {
+            _logger.LogWarning(
+                "Direct processing of document {DocumentId} is not supported " +
+                "by the current lease service. The document must be claimed " +
+                "through ProcessPendingDocumentsAsync.",
+                documentId);
+
+            await ProcessPendingDocumentsAsync(cancellationToken);
+        }
+
+        private async Task ProcessClaimedDocumentAsync(ClaimedDocument claim, CancellationToken cancellationToken)
+        {
+            var documentId = claim.DocumentId;
+            var leaseId = claim.LeaseId;
+
+            using var processingCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+
+            var renewalTask = RenewLeaseUntilCancelledAsync(documentId, leaseId, processingCts.Token);
+
             var document = await _context.Documents
                 .FirstOrDefaultAsync(
                     d => d.Id == documentId,
                     cancellationToken);
 
-            if (document == null)
+            if (document is null)
             {
                 _logger.LogWarning(
-                    "Document {DocumentId} was not found.",
+                    "Claimed document {DocumentId} was not found.",
                     documentId);
 
                 return;
@@ -88,65 +99,52 @@ namespace Lexis.Core.Services
 
             try
             {
-                // Mark document as processing
-                document.Status = DocumentStatus.Processing;
-                document.ProcessingStartedAt = DateTime.UtcNow;
-                document.ProcessingCompletedAt = null;
-                document.ProcessingError = null;
 
-                await _context.SaveChangesAsync(cancellationToken);
+                // The claim has already set the database status to Processing.
+                await _documentStatusNotifier.NotifyAsync(claim.UploadedBy, documentId, claim.FileName, DocumentStatus.Processing,
+                    cancellationToken: cancellationToken);
 
+                // Remove data left behind by any previous processing attempt.
+                await ReconcilePreviousAttemptAsync(documentId, leaseId, cancellationToken);
 
-                // ======================================================
-                // 1. Extract document content
-                // ======================================================
+                // 1. Extract document content from R2 using a temporary local file.
+                var extractedDocument = await ExtractDocumentFromR2Async(document.FilePath, cancellationToken);
 
-                var extractedDocument = await _documentExtractionService.ExtractAsync(document.FilePath, cancellationToken);
 
                 cancellationToken.ThrowIfCancellationRequested();
 
-
-                // ======================================================
-                // 2. Normalize document content
-                // ======================================================
-
+                // 2. Normalize document content.
                 var processedDocument = await _preprocessingService.ProcessAsync(extractedDocument, cancellationToken);
 
                 cancellationToken.ThrowIfCancellationRequested();
 
-                // ======================================================
-                // 3. Chunk document
-                // ======================================================
-
+                // 3. Chunk the document.
                 var chunks = _documentChunkingService.CreateChunks(documentId, processedDocument);
 
-                cancellationToken.ThrowIfCancellationRequested();
-
-
-                // ======================================================
-                // 4. Save chunks
-                // ======================================================
-
-                await _documentChunkRepository.AddRangeAsync(chunks, cancellationToken);
-
-                document.Status = DocumentStatus.Chunked;
-
-                await _context.SaveChangesAsync(cancellationToken);
-
-                // ======================================================
-                // 5. Generate embeddings
-                // ======================================================
-
-                // The chunks must already exist in PostgreSQL.
                 if (chunks.Count == 0)
                 {
-                    throw new InvalidOperationException(
-                        $"Document {documentId} produced no chunks to index.");
+                    throw new InvalidOperationException($"Document {documentId} produced no chunks to index.");
                 }
 
                 cancellationToken.ThrowIfCancellationRequested();
 
-                // 1. Generate one embedding per chunk.
+                // 4. Persist chunks in PostgreSQL.
+                await _documentChunkRepository.AddRangeAsync(chunks, cancellationToken);
+
+                var markedChunked = await _leaseService.MarkChunkedAsync(documentId, leaseId, cancellationToken);
+
+                if (!markedChunked)
+                {
+                    throw new DocumentProcessingLeaseLostException(documentId,
+                        leaseId);
+                }
+
+                await _documentStatusNotifier.NotifyAsync(claim.UploadedBy, claim.DocumentId, claim.FileName,
+                    DocumentStatus.Chunked, cancellationToken: cancellationToken); 
+
+                cancellationToken.ThrowIfCancellationRequested();
+
+                // 6. Generate one embedding per chunk.
                 var texts = chunks
                     .Select(chunk => chunk.Content)
                     .ToArray();
@@ -155,21 +153,16 @@ namespace Lexis.Core.Services
 
                 if (embeddings.Count != chunks.Count)
                 {
-                    throw new InvalidOperationException(
-                        "The embedding service returned an unexpected number of vectors.");
+                    throw new InvalidOperationException("The embedding service returned an unexpected number of vectors.");
                 }
 
-                // 2. Ensure the collection exists with the configured vector size.
+                // 7. Ensure the Qdrant collection exists.
                 await _vectorStoreService.EnsureCollectionExistsAsync(cancellationToken);
 
-                // ======================================================================
-                // 6. Store embeddings in Qdrant and update chunk records with Qdrant IDs
-                // ======================================================================
-
-                // 1. Store the embeddings in Qdrant.
+                // 8. Store vectors in Qdrant.
                 await _vectorStoreService.StoreAsync(chunks, embeddings, cancellationToken);
 
-                // 2. Persist the Qdrant IDs only after the upsert succeeds.
+                // 9. Persist Qdrant vector IDs in PostgreSQL.
                 foreach (var chunk in chunks)
                 {
                     chunk.QdrantVectorId = chunk.Id.ToString("D");
@@ -177,45 +170,200 @@ namespace Lexis.Core.Services
 
                 await _context.SaveChangesAsync(cancellationToken);
 
-                // ======================================================
-                // 7. Completed
-                // ======================================================
+                // 10. Mark the document Indexed only after indexing succeeds.
+                var completed = await _leaseService.CompleteAsync(documentId, leaseId, DocumentStatus.Indexed, error: null,
+                    cancellationToken);
 
-                // Mark the document Indexed only after both stores succeed.
-                document.Status = DocumentStatus.Indexed;
-                document.ProcessingCompletedAt = DateTime.UtcNow;
+                if (!completed)
+                {
+                    throw new DocumentProcessingLeaseLostException(documentId,leaseId);
+                }
 
-                await _context.SaveChangesAsync(cancellationToken);
+                await _documentStatusNotifier.NotifyAsync(claim.UploadedBy, documentId, claim.FileName, DocumentStatus.Indexed,
+                    cancellationToken: cancellationToken);
 
                 _logger.LogInformation(
                     "Successfully processed document {DocumentId}.",
                     documentId);
             }
-            catch (OperationCanceledException ex)
+            catch (OperationCanceledException)
             {
-                // Check if the cancellation came from a specific token source
+                // Leave the document in Processing.
+                // Recovery must decide whether the processing attempt is abandoned.
                 _logger.LogInformation(
-                    ex,
-                    "Processing cancelled for document {DocumentId}. Inner message: {Message}",
-                    documentId,
-                    ex.Message);
+                    "Processing cancelled for document {DocumentId}.",
+                    documentId);
+
                 throw;
             }
             catch (Exception ex)
             {
-                document.Status = DocumentStatus.Failed;
-                document.ProcessingCompletedAt = DateTime.UtcNow;
-                document.ProcessingError = ex.Message;
-
-                // Do not use cancellation token here.
-                // We want to save failure information even if cancellation happened.
-                await _context.SaveChangesAsync();
-
                 _logger.LogError(
                     ex,
                     "Failed processing document {DocumentId}.",
                     documentId);
+
+                try
+                {
+                    // Only the current lease owner may mark the document Failed.
+                    var markedFailed = await _leaseService.CompleteAsync(documentId, leaseId, DocumentStatus.Failed, ex.Message,
+                        CancellationToken.None);
+
+                    if (!markedFailed)
+                    {
+                        _logger.LogWarning(
+                            "Could not mark document {DocumentId} as Failed because " +
+                            "the processing lease is no longer valid. Another attempt " +
+                            "may own the document or it may already be complete.",
+                            documentId);
+
+                        return;
+                    }
+
+                    await _documentStatusNotifier.NotifyAsync(claim.UploadedBy, documentId, claim.FileName, DocumentStatus.Failed,
+                        error: ex.Message, cancellationToken: CancellationToken.None);
+                }
+                catch (Exception failureHandlingException)
+                {
+                    _logger.LogError(
+                        failureHandlingException,
+                        "Could not persist or publish the Failed status for document {DocumentId}.",
+                        documentId);
+                }
             }
+        }
+
+        private async Task<ExtractedDocument> ExtractDocumentFromR2Async(string objectKey, CancellationToken cancellationToken)
+        {
+            // Use a unique directory for each processing attempt.
+            var tempDirectory = Path.Combine(Path.GetTempPath(), $"lexis-{Guid.NewGuid():N}");
+
+            try
+            {
+                Directory.CreateDirectory(tempDirectory);
+
+                var tempPdfPath = Path.Combine(tempDirectory, "document.pdf");
+
+                // Download the persistent PDF from R2.
+                await using (var sourceStream = await _fileStorageService.GetFileAsync(objectKey))
+                {
+                    await using var destinationStream = new FileStream(tempPdfPath, FileMode.CreateNew, FileAccess.Write,
+                        FileShare.None, bufferSize: 81920, options: FileOptions.Asynchronous | FileOptions.SequentialScan);
+
+                    await sourceStream.CopyToAsync(destinationStream, cancellationToken);
+                }
+
+                cancellationToken.ThrowIfCancellationRequested();
+
+                // Docling continues using the existing file-path interface.
+                return await _documentExtractionService.ExtractAsync(tempPdfPath, cancellationToken);
+            }
+            finally
+            {
+                // Cleanup must not replace an extraction, download, or cancellation exception.
+                // If cleanup fails, log it so the leftover files can be investigated.
+                try
+                {
+                    if (Directory.Exists(tempDirectory))
+                    {
+                        Directory.Delete(tempDirectory, recursive: true);
+                    }
+                }
+                catch (Exception cleanupException)
+                {
+                    _logger.LogWarning(cleanupException, "Could not clean up temporary document directory {TempDirectory}.", tempDirectory);
+                }
+            }
+        }
+
+        private async Task<Guid?> ClaimNextPendingDocumentAsync(CancellationToken cancellationToken)
+        {
+            while (!cancellationToken.IsCancellationRequested)
+            {
+                var documentId = await _context.Documents
+                    .AsNoTracking()
+                    .Where(d => d.Status == DocumentStatus.Pending)
+                    .OrderBy(d => d.UploadedAt)
+                    .Select(d => (Guid?)d.Id)
+                    .FirstOrDefaultAsync(cancellationToken);
+
+                if (documentId is null)
+                    return null;
+
+                var now = DateTime.UtcNow;
+                var leaseId = Guid.NewGuid();
+
+                var claimed = await _context.Documents
+                    .Where(d =>
+                        d.Id == documentId.Value &&
+                        d.Status == DocumentStatus.Pending &&
+                        d.ProcessingAttempt < 3)
+                    .ExecuteUpdateAsync(setters => setters
+                        .SetProperty(d => d.Status, DocumentStatus.Processing)
+                        .SetProperty(d => d.ProcessingStartedAt, now)
+                        .SetProperty(d => d.ProcessingCompletedAt, (DateTime?)null)
+                        .SetProperty(d => d.ProcessingError, (string?)null)
+                        .SetProperty(d => d.ProcessingLeaseId, leaseId)
+                        .SetProperty(
+                            d => d.ProcessingLeaseExpiresAt,
+                            now.AddMinutes(5))
+                        .SetProperty(
+                            d => d.ProcessingAttempt,
+                            d => d.ProcessingAttempt + 1),
+                        cancellationToken);
+
+                if (claimed == 1)
+                    return documentId.Value;
+
+                // It was claimed by another worker, or has exhausted its attempts.
+            }
+
+            return null;
+        }
+
+        private async Task RenewLeaseUntilCancelledAsync(Guid documentId, Guid leaseId, CancellationToken cancellationToken)
+        {
+            var interval = TimeSpan.FromSeconds(_processingOptions.Value.LeaseRenewalSeconds);
+
+            while (true)
+            {
+                await Task.Delay(interval, cancellationToken);
+
+                await using var scope = _scopeFactory.CreateAsyncScope();
+
+                var leaseService = scope.ServiceProvider
+                    .GetRequiredService<IDocumentProcessingLeaseService>();
+
+                var renewed = await leaseService.RenewAsync(documentId, leaseId, cancellationToken);
+
+                if (!renewed)
+                {
+                    throw new DocumentProcessingLeaseLostException(documentId, leaseId);
+                }
+            }
+        }
+
+        private async Task EnsureLeaseOwnedAsync(Guid documentId, Guid leaseId, CancellationToken cancellationToken)
+        {
+            var ownsLease = await _leaseService.OwnsLeaseAsync(documentId, leaseId, cancellationToken);
+
+            if (!ownsLease)
+            {
+                throw new DocumentProcessingLeaseLostException(documentId, leaseId);
+            }
+        }
+
+        private async Task ReconcilePreviousAttemptAsync(Guid documentId, Guid leaseId, CancellationToken cancellationToken)
+        {
+            await EnsureLeaseOwnedAsync(documentId, leaseId, cancellationToken);
+
+            // Remove vectors first. If this fails, leave the PostgreSQL
+            // chunks intact and let the attempt fail/retry.
+            await _vectorStoreService.DeleteByDocumentIdAsync(documentId, cancellationToken);
+
+            await EnsureLeaseOwnedAsync(documentId, leaseId, cancellationToken);
+
+            await _documentChunkRepository.DeleteByDocumentIdAsync(documentId, cancellationToken);
         }
     }
 }

@@ -1,49 +1,89 @@
-﻿using Lexis.Core.Interfaces;
+﻿using Lexis.Core.Helpers;
+using Lexis.Core.Interfaces; 
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 
-namespace Lexis.Core.BackgroundServices
+namespace Lexis.Core.BackgroundServices;
+
+public sealed class DocumentProcessingWorker : BackgroundService
 {
-    public class DocumentProcessingWorker : BackgroundService
+    private readonly IServiceScopeFactory _scopeFactory;
+    private readonly ILogger<DocumentProcessingWorker> _logger;
+    private readonly DocumentProcessingOptions _options;
+
+    public DocumentProcessingWorker(
+        IServiceScopeFactory scopeFactory,
+        IOptions<DocumentProcessingOptions> options,
+        ILogger<DocumentProcessingWorker> logger)
     {
-        private readonly IServiceScopeFactory _scopeFactory;
-        private readonly ILogger<DocumentProcessingWorker> _logger;
+        _scopeFactory = scopeFactory;
+        _logger = logger;
+        _options = options.Value;
+    }
 
+    protected override async Task ExecuteAsync(
+        CancellationToken stoppingToken)
+    {
+        _logger.LogInformation(
+            "Document processing worker starting with concurrency {Concurrency}.",
+            _options.MaxConcurrency);
 
-        public DocumentProcessingWorker(IServiceScopeFactory scopeFactory, ILogger<DocumentProcessingWorker> logger)
+        var workers = Enumerable
+            .Range(1, _options.MaxConcurrency)
+            .Select(workerId =>
+                RunWorkerAsync(workerId, stoppingToken))
+            .ToArray();
+
+        await Task.WhenAll(workers);
+    }
+
+    private async Task RunWorkerAsync(
+        int workerId,
+        CancellationToken stoppingToken)
+    {
+        while (!stoppingToken.IsCancellationRequested)
         {
-            _scopeFactory = scopeFactory;
-            _logger = logger;
-        }
-
-        protected override async Task ExecuteAsync(CancellationToken stoppingToken)
-        {
-            while (!stoppingToken.IsCancellationRequested)
+            try
             {
-                try
-                {
-                    using var scope = _scopeFactory.CreateScope();
+                await using var scope =
+                    _scopeFactory.CreateAsyncScope();
 
-                    var processingService = scope.ServiceProvider.GetRequiredService<IDocumentProcessingService>();
+                var service = scope.ServiceProvider
+                    .GetRequiredService<IDocumentProcessingService>();
 
-
-                    await processingService
-                        .ProcessPendingDocumentsAsync(stoppingToken);
-                }
-                catch (OperationCanceledException)
-                {
-                    _logger.LogInformation("Document processing worker stopping.");
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogError(ex, "Document processing worker failed.");
-                }
-
-                await Task.Delay(
-                    TimeSpan.FromMinutes(1),
+                await service.ProcessPendingDocumentsAsync(
                     stoppingToken);
             }
+            catch (OperationCanceledException)
+                when (stoppingToken.IsCancellationRequested)
+            {
+                break;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(
+                    ex,
+                    "Document processing worker {WorkerId} encountered an error.",
+                    workerId);
+            }
+
+            try
+            {
+                await Task.Delay(
+                    TimeSpan.FromSeconds(_options.IdleDelaySeconds),
+                    stoppingToken);
+            }
+            catch (OperationCanceledException)
+                when (stoppingToken.IsCancellationRequested)
+            {
+                break;
+            }
         }
+
+        _logger.LogInformation(
+            "Document processing worker {WorkerId} stopped.",
+            workerId);
     }
 }

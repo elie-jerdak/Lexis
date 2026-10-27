@@ -38,6 +38,12 @@ public partial class Document
 
     public string? ProcessingError { get; set; }
 
+    public DateTime? ProcessingLeaseExpiresAt { get; set; }
+
+    public Guid? ProcessingLeaseId { get; set; }
+
+    public int ProcessingAttempt { get; set; }
+
     [ForeignKey(nameof(UploadedBy))]
     public virtual ApplicationUser UploadedByUser { get; set; } = null!;
 

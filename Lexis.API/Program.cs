@@ -1,4 +1,8 @@
+using Amazon.Runtime;
+using Amazon.S3;
 using Lexis.API.Data;
+using Lexis.API.Hubs;
+using Lexis.API.Services;
 using Lexis.Core.BackgroundServices;
 using Lexis.Core.Enums;
 using Lexis.Core.Helpers;
@@ -7,7 +11,8 @@ using Lexis.Core.Models;
 using Lexis.Core.Services;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Identity;
-using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore; 
+using Microsoft.Extensions.Options;
 using Microsoft.IdentityModel.Tokens;
 using Npgsql;
 using Resend;
@@ -62,8 +67,20 @@ builder.Services
         {
             OnMessageReceived = context =>
             {
-                // Keep Bearer authentication available for API tools and
-                // non-browser clients during the migration.
+                var accessToken = context.Request.Query["access_token"];
+                var requestPath = context.HttpContext.Request.Path;
+
+                // SignalR browser transports may send the JWT in the query string.
+                // Restrict this behavior to the document-status hub.
+                if (!string.IsNullOrEmpty(accessToken) &&
+                    requestPath.StartsWithSegments(
+                        DocumentStatusHub.Route))
+                {
+                    context.Token = accessToken;
+                    return Task.CompletedTask;
+                }
+
+                // Preserve your existing cookie authentication fallback.
                 if (string.IsNullOrEmpty(
                         context.Request.Headers.Authorization) &&
                     context.Request.Cookies.TryGetValue(
@@ -160,6 +177,61 @@ builder.Services.AddHttpClient<IDocumentExtractionService, DoclingExtractionServ
     client.Timeout = TimeSpan.FromMinutes(235);
 });
 
+builder.Services
+    .AddOptions<CloudflareR2Options>()
+    .Bind(builder.Configuration.GetSection(
+        CloudflareR2Options.SectionName))
+    .Validate(
+        options =>
+            Uri.TryCreate(
+                options.ServiceUrl,
+                UriKind.Absolute,
+                out var uri) &&
+            uri.Scheme == Uri.UriSchemeHttps &&
+            !string.IsNullOrWhiteSpace(options.BucketName) &&
+            !string.IsNullOrWhiteSpace(options.AccessKeyId) &&
+            !string.IsNullOrWhiteSpace(options.SecretAccessKey),
+        "Cloudflare R2 configuration is invalid.")
+    .ValidateOnStart();
+
+builder.Services.AddSingleton<Amazon.S3.IAmazonS3>(serviceProvider =>
+{
+    var options = serviceProvider
+        .GetRequiredService<IOptions<CloudflareR2Options>>()
+        .Value;
+
+    var credentials = new BasicAWSCredentials(
+        options.AccessKeyId,
+        options.SecretAccessKey);
+
+    var config = new AmazonS3Config
+    {
+        ServiceURL = options.ServiceUrl,
+        AuthenticationRegion = "auto",
+        ForcePathStyle = true
+    };
+
+    return new AmazonS3Client(credentials, config);
+});
+
+builder.Services
+    .AddOptions<DocumentProcessingOptions>()
+    .Bind(builder.Configuration.GetSection(
+        DocumentProcessingOptions.SectionName))
+    .Validate(
+        options =>
+            options.MaxConcurrency is >= 1 and <= 16 &&
+            options.MaxAttempts >= 1 &&
+            options.LeaseDurationSeconds >= 30 &&
+            options.LeaseRenewalSeconds >= 5 &&
+            options.LeaseRenewalSeconds < options.LeaseDurationSeconds &&
+            options.IdleDelaySeconds >= 1,
+        "DocumentProcessing configuration is invalid.")
+    .ValidateOnStart();
+
+builder.Services.AddSignalR();
+
+builder.Services.AddSingleton<IDocumentStatusNotifier, DocumentStatusNotifier>();
 
 builder.Services.AddRateLimiter(options =>
 {
@@ -260,13 +332,20 @@ static RateLimitPartition<string> CreateUserLimiter(
         _ => CreateLimiterOptions(limit));
 }
 
+builder.Services.AddStackExchangeRedisCache(options =>
+{
+    options.Configuration =
+        builder.Configuration["Redis:ConnectionString"];
+
+    options.InstanceName = "Lexis:";
+});
 
 builder.Services.AddScoped<IJwtService, JwtService>();
 builder.Services.AddScoped<IAuthService, AuthenticationService>();
 builder.Services.AddScoped<IEmailService, EmailService>();
 builder.Services.AddScoped<IUserService, UserService>();
 builder.Services.AddScoped<IRefreshTokenService, RefreshTokenService>();
-builder.Services.AddScoped<IFileStorageService, LocalFileStorageService>();
+//builder.Services.AddScoped<IFileStorageService, LocalFileStorageService>();
 builder.Services.AddScoped<IFileHashService, FileHashService>();
 builder.Services.AddScoped<IDocumentService, DocumentService>();
 builder.Services.AddScoped<IDocumentProcessingService, DocumentProcessingService>(); 
@@ -283,6 +362,8 @@ builder.Services.AddScoped<IRagService, RagService>();
 builder.Services.AddScoped<IConversationService, ConversationService>();
 builder.Services.AddHttpClient<IAnswerGenerationService, OpenAiAnswerGenerationService>();
 builder.Services.AddScoped<IUsageLogService, UsageLogService>();
+builder.Services.AddScoped<IFileStorageService, R2FileStorageService>();
+builder.Services.AddScoped<IDocumentProcessingLeaseService, DocumentProcessingLeaseService>();
 
 var app = builder.Build();
 
@@ -356,5 +437,7 @@ using (var scope = app.Services.CreateScope())
 
     await IdentitySeeder.SeedAsync(userManager, roleManager);
 }
+
+app.MapHub<DocumentStatusHub>(DocumentStatusHub.Route);
 
 app.Run();

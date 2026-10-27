@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { apiRequest, authenticatedFetch, logout } from "@/lib/api";
 import { createPortal } from "react-dom";
 import { Icon } from "@/components/ui/Icon";
@@ -10,10 +10,13 @@ import { mapDocument } from "@/lib/document-utils";
 import { SidebarToggleButton } from "@/components/ui/SidebarToggleButton";
 import UsageLogsPanel from "@/components/usage-logs/UsageLogsPanel";
 import { useRouter } from "next/navigation";
+import {HubConnectionBuilder, HubConnectionState, LogLevel} from "@microsoft/signalr";
+import { normalizeStatus } from "@/lib/document-utils";
 
 export default function Home() {
   const router = useRouter();
   const [isCheckingAuth, setIsCheckingAuth] = useState(true);
+  const [retryingDocumentId, setRetryingDocumentId] = useState<string | null>(null);
   const [activeNav, setActiveNav] = useState<NavItem>("Overview");
   const [documents, setDocuments] = useState<DocumentItem[]>([]);
   const [openDocumentMenuId, setOpenDocumentMenuId] = useState<string | null>(null);
@@ -245,7 +248,7 @@ export default function Home() {
     setIsMobileSidebarOpen(false); 
   }
 
-  async function loadDocuments() {
+  const loadDocuments = useCallback(async () => {
     setIsLoadingDocuments(true);
 
     try {
@@ -260,7 +263,135 @@ export default function Home() {
     } finally {
       setIsLoadingDocuments(false);
     }
-  }
+  }, []);
+
+  const updateDocumentStatus = useCallback(
+    (event: {
+      documentId: string;
+      status: string | number;
+    }) => {
+      const status = normalizeStatus(event.status);
+
+      setDocuments((current) =>
+        current.map((document) =>
+          document.id === event.documentId
+            ? { ...document, status }
+            : document,
+        ),
+      );
+
+      // Keep the details modal in sync if it is open.
+      setSelectedDocument((current) =>
+        current?.id === event.documentId
+          ? { ...current, status }
+          : current,
+      );
+    },
+    [],
+  );
+
+  //SignalR effect
+  useEffect(() => {
+    console.log("[SignalR] Effect started", {
+      isCheckingAuth,
+      cookieBasedAuth: true,
+    });
+
+    if (isCheckingAuth) {
+      console.log("[SignalR] Waiting for session check");
+      return;
+    }
+
+    let disposed = false;
+    let connection:
+      | import("@microsoft/signalr").HubConnection
+      | undefined;
+
+    const connect = async () => {
+      const baseUrl = process.env.NEXT_PUBLIC_API_BASE_URL;
+
+      console.log("[SignalR] API base URL:", baseUrl);
+
+      if (!baseUrl || disposed) {
+        console.error("[SignalR] Missing API URL or effect disposed");
+        return;
+      }
+
+      const hubUrl = `${baseUrl.replace(/\/+$/, "")}/hubs/document-status`;
+
+      connection = new HubConnectionBuilder()
+        .withUrl(hubUrl, {
+          withCredentials: true,
+        })
+        .withAutomaticReconnect()
+        .configureLogging(LogLevel.Information)
+        .build();
+
+      connection.on("DocumentStatusChanged", (event) => {
+        console.log("[SignalR] Status event received:", {
+          documentId: event.documentId,
+          fileName: event.fileName,
+          numericStatus: event.status,
+          mappedStatus: normalizeStatus(event.status),
+          error: event.error,
+          changedAtUtc: event.changedAtUtc,
+        });
+
+        if (disposed) return;
+
+        updateDocumentStatus({
+          documentId: event.documentId,
+          status: event.status,
+        });
+      });
+
+      connection.onreconnecting((error) => {
+        console.warn("[SignalR] Reconnecting:", error);
+      });
+
+      connection.onreconnected(() => {
+        console.log("[SignalR] Reconnected");
+
+        if (!disposed) {
+          void loadDocuments();
+        }
+      });
+
+      connection.onclose((error) => {
+        console.error("[SignalR] Connection closed:", error);
+      });
+
+      try {
+        console.log("[SignalR] Starting connection:", hubUrl);
+
+        await connection.start();
+
+        if (disposed) {
+          await connection.stop();
+          return;
+        }
+
+        console.log("[SignalR] Connected successfully");
+
+        await loadDocuments();
+      } catch (error) {
+        console.error("[SignalR] Connection failed:", error);
+      }
+    };
+
+    void connect();
+
+    return () => {
+      disposed = true;
+
+      console.log("[SignalR] Cleaning up connection");
+
+      if (connection) {
+        connection.off("DocumentStatusChanged");
+        void connection.stop();
+      }
+    };
+  }, [isCheckingAuth, loadDocuments, updateDocumentStatus]);
 
   async function handleViewDetails(document: DocumentItem) {
     setOpenDocumentMenuId(null);
@@ -356,6 +487,48 @@ export default function Home() {
       );
     }
   }
+
+
+  async function handleRetryDocument(document: DocumentItem) {
+    if (retryingDocumentId !== null) return;
+
+    setRetryingDocumentId(document.id);
+    setNotice("");
+
+    try {
+      const result = await apiRequest<{ message: string; status: string | number }>(
+        `/api/Document/${encodeURIComponent(document.id)}/retry`,
+        { method: "POST" },
+      );
+
+      const status = normalizeStatus(result.status);
+
+      // Update the row immediately; SignalR will also report subsequent
+      // processing transitions from the backend.
+      setDocuments((current) =>
+        current.map((item) =>
+          item.id === document.id ? { ...item, status } : item,
+        ),
+      );
+
+      setSelectedDocument((current) =>
+        current?.id === document.id ? { ...current, status } : current,
+      );
+
+      setOpenDocumentMenuId(null);
+      setMenuPosition(null);
+      setNotice(result.message || `${document.name} queued for retry.`);
+    } catch (error) {
+      setNotice(
+        error instanceof Error
+          ? `Could not retry ${document.name}: ${error.message}`
+          : `Could not retry ${document.name}.`,
+      );
+    } finally {
+      setRetryingDocumentId(null);
+    }
+  }
+
 
   async function startNewConversation() {
     if (isCreatingConversation || isSendingMessage) return;
@@ -1109,22 +1282,48 @@ export default function Home() {
                                         right: menuPosition.right,
                                       }}
                                     >
-                                      <button type="button" onClick={() => void handleViewDetails(document)}
-                                        disabled={isLoadingDetails} className="flex w-full items-center gap-2 rounded-lg px-3 py-2 
-                                          text-left text-sm text-slate-700 hover:bg-slate-50 disabled:opacity-50">
+                                      {document.status === "Failed" && (
+                                        <button
+                                          type="button"
+                                          onClick={() => void handleRetryDocument(document)}
+                                          disabled={retryingDocumentId !== null}
+                                          className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm text-violet-700 hover:bg-violet-50 disabled:cursor-not-allowed disabled:opacity-50"
+                                        >
+                                          <Icon
+                                            name={retryingDocumentId === document.id ? "clock" : "rotate-ccw"}
+                                            size={16}
+                                          />
+                                          {retryingDocumentId === document.id
+                                            ? "Queueing retry..."
+                                            : "Retry processing"}
+                                        </button>
+                                      )}
+
+                                      <button
+                                        type="button"
+                                        onClick={() => void handleViewDetails(document)}
+                                        disabled={document.status !== "Indexed" || isLoadingDetails}
+                                        className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent"
+                                      >
                                         <Icon name="file" size={16} />
                                         View details
                                       </button>
 
-                                      <button type="button" onClick={() => void handleDownload(document)}
-                                        className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm text-slate-700 
-                                        hover:bg-slate-50">
+                                      <button
+                                        type="button"
+                                        onClick={() => void handleDownload(document)}
+                                        disabled={document.status !== "Indexed"}
+                                        className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent"
+                                      >
                                         <Icon name="download" size={16} />
                                         Download
                                       </button>
 
-                                      <button type="button" onClick={() => void handleDelete(document)}
-                                        className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm text-rose-600 hover:bg-rose-50">
+                                      <button
+                                        type="button"
+                                        onClick={() => void handleDelete(document)}
+                                        className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm text-rose-600 hover:bg-rose-50"
+                                      >
                                         <Icon name="trash-2" size={16} />
                                         Delete
                                       </button>

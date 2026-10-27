@@ -111,8 +111,7 @@ namespace Lexis.API.Controllers
                 return Unauthorized();
 
 
-            var result = await _documentService
-                .DeleteDocumentAsync(userId.Value, id);
+            var result = await _documentService.DeleteDocumentAsync(userId.Value, id);
 
 
             if (!result.IsSuccess)
@@ -144,6 +143,55 @@ namespace Lexis.API.Controllers
             var fileStream = await _fileStorageService.GetFileAsync(document.FilePath);
 
             return File(fileStream, document.MimeType, document.FileName);
+        }
+
+        [HttpPost("{id:guid}/retry")]
+        public async Task<IActionResult> RetryDocument(Guid id, CancellationToken cancellationToken)
+        {
+            var userId = GetUserId();
+
+            if (userId == null)
+            {
+                return Unauthorized(new
+                {
+                    message = "User information could not be retrieved.",
+                    code = "USER_ID_NOT_FOUND"
+                });
+            }
+
+            var result = await _documentService.RetryDocumentUploadAsync(userId.Value, id, cancellationToken);
+
+            if (!result.IsSuccess)
+            {
+                return result.ErrorCode switch
+                {
+                    "DOCUMENT_NOT_FOUND" => NotFound(new
+                    {
+                        message = result.ErrorMessage,
+                        code = result.ErrorCode
+                    }),
+
+                    "DOCUMENT_PROCESSING_ACTIVE" or
+                    "DOCUMENT_ALREADY_INDEXED" or
+                    "DOCUMENT_RETRY_CONFLICT" => Conflict(new
+                    {
+                        message = result.ErrorMessage,
+                        code = result.ErrorCode
+                    }),
+
+                    _ => BadRequest(new
+                    {
+                        message = result.ErrorMessage,
+                        code = result.ErrorCode
+                    })
+                };
+            }
+
+            return Ok(new
+            {
+                message = "Document queued for retry.",
+                status = result.Data
+            });
         }
     }
 }

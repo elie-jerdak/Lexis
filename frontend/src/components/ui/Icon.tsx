@@ -58,6 +58,30 @@ export function Icon({name, size = 18,}: {
         </svg>
       );
     
+    case "clock":
+      return (
+        <svg {...common}>
+          <circle cx="12" cy="12" r="9" />
+          <path d="M12 7v5l3 2" />
+        </svg>
+      );
+    
+    case "rotate-ccw":
+      return (
+        <svg {...common}>
+          <path d="M1 4v6h6" />
+          <path d="M3.51 15a9 9 0 1 0 .49-9.95L1 10" />
+        </svg>
+      );
+
+    case "rotate-cw":
+      return (
+        <svg {...common}>
+          <path d="M23 4v6h-6" />
+          <path d="M20.49 15a9 9 0 1 1-.49-9.95L23 10" />
+        </svg>
+      );
+      
     case "pencil":
       return (
         <svg {...common}>

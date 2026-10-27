@@ -3,7 +3,6 @@ using Lexis.Core.Models;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Identity.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore;
-using Npgsql;
 
 namespace Lexis.API.Data;
 

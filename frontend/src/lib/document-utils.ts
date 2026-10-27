@@ -17,9 +17,17 @@ export function formatDate(value: string): string {
 
 export function normalizeStatus(value: string | number): DocumentStatus {
   if (typeof value === "number") {
-    const numericStatuses: Record<number, DocumentStatus> = { 0: "Pending", 1: "Processing", 2: "Indexed", 3: "Failed", 4: "Chunked" };
+    const numericStatuses: Record<number, DocumentStatus> = {
+      0: "Pending",
+      1: "Processing",
+      2: "Indexed",
+      3: "Chunked",
+      4: "Failed",
+    };
+
     return numericStatuses[value] ?? "Pending";
   }
+
   switch (value.toLowerCase()) {
     case "pending": return "Pending";
     case "processing": return "Processing";

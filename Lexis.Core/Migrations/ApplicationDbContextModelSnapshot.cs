@@ -23,8 +23,8 @@ namespace Lexis.API.Migrations
 
             NpgsqlModelBuilderExtensions.HasPostgresEnum(modelBuilder, "document_status", new[] { "chunked", "failed", "indexed", "pending", "processing" });
             NpgsqlModelBuilderExtensions.HasPostgresEnum(modelBuilder, "document_status", "document_status", new[] { "pending", "processing", "indexed", "chunked", "failed" });
-            NpgsqlModelBuilderExtensions.HasPostgresEnum(modelBuilder, "message_role", new[] { "assistant", "user" });
-            NpgsqlModelBuilderExtensions.HasPostgresEnum(modelBuilder, "message_role", "message_role", new[] { "user", "assistant" });
+            NpgsqlModelBuilderExtensions.HasPostgresEnum(modelBuilder, "message_role", new[] { "Assistant", "User" });
+            NpgsqlModelBuilderExtensions.HasPostgresEnum(modelBuilder, "message_role", "message_role", new[] { "User", "Assistant" });
             NpgsqlModelBuilderExtensions.UseIdentityByDefaultColumns(modelBuilder);
 
             modelBuilder.Entity("Lexis.Core.Models.ApplicationUser", b =>
@@ -232,11 +232,20 @@ namespace Lexis.API.Migrations
                         .HasMaxLength(100)
                         .HasColumnType("character varying(100)");
 
+                    b.Property<int>("ProcessingAttempt")
+                        .HasColumnType("integer");
+
                     b.Property<DateTime?>("ProcessingCompletedAt")
                         .HasColumnType("timestamp with time zone");
 
                     b.Property<string>("ProcessingError")
                         .HasColumnType("text");
+
+                    b.Property<DateTime?>("ProcessingLeaseExpiresAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid?>("ProcessingLeaseId")
+                        .HasColumnType("uuid");
 
                     b.Property<DateTime?>("ProcessingStartedAt")
                         .HasColumnType("timestamp with time zone");

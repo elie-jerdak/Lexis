@@ -13,5 +13,6 @@ namespace Lexis.Core.Interfaces
             CancellationToken cancellationToken = default); 
         Task<IReadOnlyList<VectorSearchResult>> SearchAsync(IReadOnlyList<float> embedding, int limit, 
             IReadOnlyCollection<Guid> documentIds, CancellationToken cancellationToken = default);
+        Task DeleteByDocumentIdAsync(Guid documentId, CancellationToken cancellationToken = default);
     }
 }
